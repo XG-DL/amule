@@ -1448,32 +1448,12 @@ bool CamuleApp::OnInit()
 bool CamuleApp::ReinitializeNetwork(wxString *msg)
 {
 	bool ok = true;
-	const bool resumeServerConnection = serverconnect &&
-		(serverconnect->IsConnected() || serverconnect->IsConnecting());
-	if (IsRunning()) {
-		AddLogLineC(_("Rebinding P2P listening sockets; existing peer connections will close."));
-	}
+	static bool firstTime = true;
 
-	// This path is used at startup and when the user applies new listening ports.
-	// Tear down the objects that own the P2P listening sockets before constructing
-	// replacements. The listen socket closes accepted peer connections, and removing
-	// CServerConnect closes its server connection; both are expected consequences of
-	// changing the local network endpoints.
-#ifdef ENABLE_UPNP
-	if (m_upnp) {
-		if (thePrefs::GetUPnPEnabled()) {
-			m_upnp->DeletePortMappings(m_upnpMappings);
-		}
-		delete m_upnp;
-		m_upnp = NULL;
+	if (!firstTime) {
+		// TODO: Destroy previously created sockets
 	}
-#endif
-	delete serverconnect;
-	serverconnect = NULL;
-	delete listensocket;
-	listensocket = NULL;
-	delete clientudp;
-	clientudp = NULL;
+	firstTime = false;
 
 	// Some sanity checks first
 	if (thePrefs::ECPort() == thePrefs::GetPort()) {
@@ -1604,17 +1584,10 @@ bool CamuleApp::ReinitializeNetwork(wxString *msg)
 	// interface entirely.
 	RefreshLocalPublicIPv6Addresses();
 
-	// Recreating CServerConnect drops its previous server connection. Resume the
-	// configured automatic connection behaviour when a rebind happens at runtime.
-	if (IsRunning() && thePrefs::GetNetworkED2K() &&
-		(resumeServerConnection || thePrefs::DoAutoConnect())) {
-		serverconnect->ConnectToAnyServer();
-	}
-
 	return ok;
 }
 
-bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, wxString *msg)
+bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint16 oldTcpPort, wxString *msg)
 {
 	if (!IsRunning() || (!tcpPortChanged && !udpPortChanged)) {
 		return true;
@@ -1640,43 +1613,55 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, wxStr
 	}
 
 	const bool resumeServerConnection = tcpPortChanged && serverconnect &&
-		(serverconnect->IsConnected() || serverconnect->IsConnecting());
+					    (serverconnect->IsConnected() || serverconnect->IsConnecting());
 	amuleIPV4Address p2pAddress;
 	if (thePrefs::GetAddress().IsEmpty()) {
 		p2pAddress.AnyAddress();
 	} else if (!p2pAddress.Hostname(thePrefs::GetAddress())) {
 		p2pAddress.AnyAddress();
 		AddLogLineC(CFormat(_("Could not bind ports to the specified address: %s")) %
-			thePrefs::GetAddress());
+			    thePrefs::GetAddress());
 	}
 
-	// Prepare a replacement UDP socket before disturbing the current endpoints. TCP
-	// connections accepted by CListenSocket belong to its socket_list and remain alive
-	// when only the acceptor is replaced below.
-	CClientUDPSocket *replacementClientUdp = NULL;
+	// Prepare a replacement UDP socket before disturbing the current endpoints.
+	// TCP connections accepted by CListenSocket belong to its socket_list and
+	// remain alive when only the acceptor is replaced below.
+	CClientUDPSocket *replacementClientUdp = nullptr;
 	if (udpPortChanged) {
 		p2pAddress.Service(udpPort);
 		replacementClientUdp = new CClientUDPSocket(p2pAddress, thePrefs::GetProxyData());
 		if (!thePrefs::IsUDPDisabled() && !replacementClientUdp->Ok()) {
 			delete replacementClientUdp;
-			*msg << CFormat(_("Could not bind the client UDP port %u. No sockets were changed.\n")) %
-				static_cast<unsigned int>(udpPort);
+			*msg << CFormat(_("Could not bind the client UDP port %u. No sockets were "
+					  "changed.\n")) %
+					static_cast<unsigned int>(udpPort);
 			return false;
 		}
 	}
 
 	if (tcpPortChanged) {
-		p2pAddress.Service(tcpPort);
-		if (!listensocket || !listensocket->Rebind(p2pAddress)) {
+		p2pAddress.Service(static_cast<uint16>(serverUdpPort));
+		if (!serverconnect || !serverconnect->RebindServerUDPSocket(p2pAddress)) {
 			delete replacementClientUdp;
-			*msg << CFormat(_("Could not rebind the P2P TCP port %u; the previous listener "
-					   "remains active.\n")) % static_cast<unsigned int>(tcpPort);
+			*msg << CFormat(_("Could not rebind the server UDP port %u; no sockets were "
+					  "changed.\n")) %
+					static_cast<unsigned int>(serverUdpPort);
 			return false;
 		}
 
-		p2pAddress.Service(static_cast<uint16>(serverUdpPort));
-		delete serverconnect;
-		serverconnect = new CServerConnect(serverlist, p2pAddress);
+		p2pAddress.Service(tcpPort);
+		if (!listensocket || !listensocket->Rebind(p2pAddress)) {
+			p2pAddress.Service(static_cast<uint16>(oldTcpPort + 3));
+			const bool serverUdpRestored = serverconnect->RebindServerUDPSocket(p2pAddress);
+			delete replacementClientUdp;
+			*msg << CFormat(_("Could not rebind the P2P TCP port %u. %s")) %
+					static_cast<unsigned int>(tcpPort) %
+					(serverUdpRestored ? _("The previous listener and server UDP socket "
+							       "remain active.\n")
+							   : _("The server UDP socket could not be restored; "
+							       "restart aMule.\n"));
+			return false;
+		}
 	}
 
 	if (udpPortChanged) {
@@ -1688,33 +1673,63 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, wxStr
 		(resumeServerConnection || thePrefs::DoAutoConnect())) {
 		serverconnect->ConnectToAnyServer();
 	}
+	if (Kademlia::CKademlia::IsRunning()) {
+		Kademlia::CKademlia::RecheckFirewalled();
+	}
 
 #ifdef ENABLE_UPNP
-	// Keep the existing control point and its discovered WAN service. Recreating it
-	// would repeat StartUPnP's startup wait on the Preferences/EC request path.
+	// Keep the existing control point and its discovered WAN service. Recreating
+	// it would repeat StartUPnP's startup wait on the Preferences/EC request
+	// path.
 	if (m_upnp) {
-		m_upnp->DeletePortMappings(m_upnpMappings);
-		if (thePrefs::GetUPnPEnabled()) {
-			m_upnpMappings[0] = CUPnPPortMapping(thePrefs::ECPort(),
-				"TCP",
-				thePrefs::GetUPnPECEnabled(),
-				"aMule TCP External Connections Socket");
-			m_upnpMappings[1] = CUPnPPortMapping(static_cast<uint16>(serverUdpPort),
-				"UDP",
-				thePrefs::GetUPnPEnabled(),
-				"aMule UDP socket (TCP+3)");
-			m_upnpMappings[2] = CUPnPPortMapping(
-				tcpPort, "TCP", thePrefs::GetUPnPEnabled(), "aMule TCP Listen Socket");
-			m_upnpMappings[3] = CUPnPPortMapping(udpPort,
-				"UDP",
-				thePrefs::GetUPnPEnabled(),
-				"aMule UDP Extended eMule Socket");
-			m_upnp->AddPortMappings(m_upnpMappings);
+		if (!thePrefs::GetUPnPEnabled()) {
+			// Disabling UPnP is an explicit request to remove every mapping.
+			m_upnp->DeletePortMappings(m_upnpMappings);
+		} else {
+			std::vector<CUPnPPortMapping> changedMappings;
+			if (tcpPortChanged) {
+				changedMappings.push_back(m_upnpMappings[1]);
+				changedMappings.push_back(m_upnpMappings[2]);
+			}
+			if (udpPortChanged) {
+				changedMappings.push_back(m_upnpMappings[3]);
+			}
+			if (!changedMappings.empty()) {
+				m_upnp->DeletePortMappings(changedMappings);
+			}
+			if (tcpPortChanged) {
+				m_upnpMappings[1] = CUPnPPortMapping(static_cast<uint16>(serverUdpPort),
+					"UDP",
+					thePrefs::GetUPnPEnabled(),
+					"aMule UDP socket (TCP+3)");
+				m_upnpMappings[2] = CUPnPPortMapping(tcpPort,
+					"TCP",
+					thePrefs::GetUPnPEnabled(),
+					"aMule TCP Listen Socket");
+			}
+			if (udpPortChanged) {
+				m_upnpMappings[3] = CUPnPPortMapping(udpPort,
+					"UDP",
+					thePrefs::GetUPnPEnabled(),
+					"aMule UDP Extended eMule Socket");
+			}
+			changedMappings.clear();
+			if (tcpPortChanged) {
+				changedMappings.push_back(m_upnpMappings[1]);
+				changedMappings.push_back(m_upnpMappings[2]);
+			}
+			if (udpPortChanged) {
+				changedMappings.push_back(m_upnpMappings[3]);
+			}
+			if (!changedMappings.empty()) {
+				m_upnp->AddPortMappings(changedMappings);
+			}
 		}
 	}
 #endif
 
-	AddLogLineC(_("P2P listening sockets rebound; established peer connections were kept."));
+	AddLogLineC(_("P2P listening sockets rebound; established peer connections "
+		      "were kept."));
 	return true;
 }
 

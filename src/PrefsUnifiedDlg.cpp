@@ -1105,6 +1105,10 @@ void PrefsUnifiedDlg::SetCredentialStateLabel(int id, bool isSet)
 
 void PrefsUnifiedDlg::OnOk(wxCommandEvent &WXUNUSED(event))
 {
+#ifndef CLIENT_GUI
+	const uint16 previousTcpPort = thePrefs::GetPort();
+	const uint16 previousUdpPort = thePrefs::GetUDPPort();
+#endif
 	TransferFromWindow();
 
 	// Before the share commit below, whose reload must already use the new filter.
@@ -1295,8 +1299,13 @@ void PrefsUnifiedDlg::OnOk(wxCommandEvent &WXUNUSED(event))
 	if ((tcpPortChanged || udpPortChanged) && !bindAddressChanged && !bindInterfaceChanged &&
 		theApp->IsRunning()) {
 		wxString networkMessage;
-		if (!theApp->RebindP2PSockets(tcpPortChanged, udpPortChanged, &networkMessage)) {
+		if (!theApp->RebindP2PSockets(
+			    tcpPortChanged, udpPortChanged, previousTcpPort, &networkMessage)) {
+			thePrefs::SetPort(previousTcpPort);
+			thePrefs::SetUDPPort(previousUdpPort);
+			theApp->glob_prefs->Save();
 			AddLogLineC(networkMessage);
+			wxMessageBox(networkMessage, _("ERROR"), wxOK | wxICON_ERROR, this);
 		}
 	}
 #endif

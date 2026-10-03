@@ -73,6 +73,8 @@ public:
 	 * Opens the socket, bound to the address given to the constructor.
 	 */
 	void Open();
+	/** Rebind this socket without replacing the socket-owning object. */
+	bool Rebind(const amuleIPV4Address &address);
 
 	/**
 	 * Closes the socket. It can be reopened with Open(); closing an already closed socket is
