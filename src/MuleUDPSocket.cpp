@@ -97,6 +97,33 @@ void CMuleUDPSocket::Open()
 	CreateSocket();
 }
 
+bool CMuleUDPSocket::Rebind(const amuleIPV4Address &address)
+{
+	wxMutexLocker lock(m_mutex);
+
+	// Keep the CMuleUDPSocket instance alive: server DNS lookups retain its
+	// address as callback data. Prepare the replacement before retiring the
+	// current socket.
+	amuleIPV4Address bindAddress = address;
+	CEncryptedDatagramSocket *replacement =
+		new CEncryptedDatagramSocket(bindAddress, MULE_SOCKET_NOWAIT, m_proxy);
+	replacement->SetClientData(this);
+	replacement->Notify(true);
+	if (!replacement->IsOk()) {
+		replacement->Close();
+		replacement->Destroy();
+		return false;
+	}
+
+	if (m_socket) {
+		m_socket->Close();
+		m_socket->Destroy();
+	}
+	m_addr = address;
+	m_socket = replacement;
+	return true;
+}
+
 void CMuleUDPSocket::Close()
 {
 	wxMutexLocker lock(m_mutex);

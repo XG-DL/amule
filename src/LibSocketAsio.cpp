@@ -1457,7 +1457,8 @@ public:
 	CAsioSocketServerImpl(const amuleIPV4Address &adr,
 		CLibSocketServer *libSocketServer,
 		bool bindInterfaceOverride = false,
-		const wxString &bindInterface = wxEmptyString)
+		const wxString &bindInterface = wxEmptyString,
+		bool exclusiveBind = false)
 	: ip::tcp::acceptor(s_io_service)
 	, m_libSocketServer(libSocketServer)
 	, m_acceptStopped(false)
@@ -1465,6 +1466,7 @@ public:
 	, m_address(adr)
 	, m_bindInterfaceOverride(bindInterfaceOverride)
 	, m_bindInterface(bindInterface)
+	, m_exclusiveBind(exclusiveBind)
 	{
 		m_ok = false;
 		m_socketAvailable = false;
@@ -1486,7 +1488,13 @@ public:
 			SetBoundInterface(native_handle(),
 				m_bindInterfaceOverride ? m_bindInterface : s_bindToInterface,
 				false);
+			// A replacement listener must fail if another process already owns the
+			// requested port. On Windows SO_REUSEADDR can otherwise allow both binds.
+#ifdef __WXMSW__
+			set_option(ip::tcp::acceptor::reuse_address(!m_exclusiveBind));
+#else
 			set_option(ip::tcp::acceptor::reuse_address(true));
+#endif
 			bind(m_address.GetEndpoint());
 			listen();
 			auto self = shared_from_this();
@@ -1630,6 +1638,7 @@ private:
 	// s_bindToInterface. Lets the EC listener bind to a different interface than ed2k/Kad.
 	bool m_bindInterfaceOverride;
 	wxString m_bindInterface;
+	bool m_exclusiveBind;
 };
 
 CLibSocketServer::CLibSocketServer(const amuleIPV4Address &adr, int /* flags */)
@@ -1662,7 +1671,7 @@ CLibSocketServer::~CLibSocketServer()
 
 bool CLibSocketServer::Rebind(const amuleIPV4Address &adr)
 {
-	auto replacement = std::make_shared<CAsioSocketServerImpl>(adr, this);
+	auto replacement = std::make_shared<CAsioSocketServerImpl>(adr, this, false, wxEmptyString, true);
 	replacement->Init();
 	if (!replacement->IsOk()) {
 		return false;
