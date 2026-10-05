@@ -4007,9 +4007,9 @@ CECPacket *CECServerSocket::ProcessRequest2(const CECPacket *request)
 		if (portsChanged && oldBindAddress == thePrefs::GetAddress() &&
 			oldBindInterface == thePrefs::GetNetworkInterface() && theApp->IsRunning()) {
 			if (!theApp->RebindP2PSockets(oldTcpPort != thePrefs::GetPort(),
-					oldUdpPort != thePrefs::GetUDPPort(),
-					oldTcpPort,
-					&networkMessage)) {
+				    oldUdpPort != thePrefs::GetUDPPort(),
+				    oldTcpPort,
+				    &networkMessage)) {
 				thePrefs::SetPort(oldTcpPort);
 				thePrefs::SetUDPPort(oldUdpPort);
 				theApp->glob_prefs->Save();

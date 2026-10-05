@@ -1300,10 +1300,7 @@ void PrefsUnifiedDlg::OnOk(wxCommandEvent &WXUNUSED(event))
 		theApp->IsRunning()) {
 		wxString networkMessage;
 		if (!theApp->RebindP2PSockets(
-			    tcpPortChanged,
-			    udpPortChanged,
-			    previousTcpPort,
-			    &networkMessage)) {
+			    tcpPortChanged, udpPortChanged, previousTcpPort, &networkMessage)) {
 			thePrefs::SetPort(previousTcpPort);
 			thePrefs::SetUDPPort(previousUdpPort);
 			theApp->glob_prefs->Save();

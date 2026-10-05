@@ -1587,10 +1587,7 @@ bool CamuleApp::ReinitializeNetwork(wxString *msg)
 	return ok;
 }
 
-bool CamuleApp::RebindP2PSockets(bool tcpPortChanged,
-	bool udpPortChanged,
-	uint16 oldTcpPort,
-	wxString *msg)
+bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint16 oldTcpPort, wxString *msg)
 {
 	if (!IsRunning() || (!tcpPortChanged && !udpPortChanged)) {
 		return true;
@@ -1660,21 +1657,21 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged,
 				p2pAddress.Service(oldTcpPort);
 				listenerRestored = listensocket && listensocket->Rebind(p2pAddress);
 				p2pAddress.Service(static_cast<uint16>(oldTcpPort + 3));
-				serverUdpRestored = serverconnect &&
-						    serverconnect->RebindServerUDPSocket(p2pAddress);
+				serverUdpRestored =
+					serverconnect && serverconnect->RebindServerUDPSocket(p2pAddress);
 			}
 			wxString restorationMessage;
 			if (listenerRestored && serverUdpRestored) {
-				restorationMessage = tcpPortChanged
-						    ? _("The previous P2P listeners remain active.\n")
-						    : _("The previous client UDP socket remains active.\n");
-			} else {
 				restorationMessage =
-					_("Some previous P2P sockets could not be restored; restart aMule.\n");
+					tcpPortChanged
+						? _("The previous P2P listeners remain active.\n")
+						: _("The previous client UDP socket remains active.\n");
+			} else {
+				restorationMessage = _(
+					"Some previous P2P sockets could not be restored; restart aMule.\n");
 			}
 			*msg << CFormat(_("Could not rebind the client UDP port %u. %s")) %
-					static_cast<unsigned int>(udpPort) %
-					restorationMessage;
+					static_cast<unsigned int>(udpPort) % restorationMessage;
 			return false;
 		}
 	}
