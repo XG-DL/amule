@@ -1587,7 +1587,10 @@ bool CamuleApp::ReinitializeNetwork(wxString *msg)
 	return ok;
 }
 
-bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint16 oldTcpPort, wxString *msg)
+bool CamuleApp::RebindP2PSockets(bool tcpPortChanged,
+	bool udpPortChanged,
+	uint16 oldTcpPort,
+	wxString *msg)
 {
 	if (!IsRunning() || (!tcpPortChanged && !udpPortChanged)) {
 		return true;
@@ -1623,26 +1626,11 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint1
 			    thePrefs::GetAddress());
 	}
 
-	// Prepare a replacement UDP socket before disturbing the current endpoints.
 	// TCP connections accepted by CListenSocket belong to its socket_list and
-	// remain alive when only the acceptor is replaced below.
-	CClientUDPSocket *replacementClientUdp = nullptr;
-	if (udpPortChanged) {
-		p2pAddress.Service(udpPort);
-		replacementClientUdp = new CClientUDPSocket(p2pAddress, thePrefs::GetProxyData());
-		if (!thePrefs::IsUDPDisabled() && !replacementClientUdp->Ok()) {
-			delete replacementClientUdp;
-			*msg << CFormat(_("Could not bind the client UDP port %u. No sockets were "
-					  "changed.\n")) %
-					static_cast<unsigned int>(udpPort);
-			return false;
-		}
-	}
-
+	// remain alive when only the acceptor is replaced.
 	if (tcpPortChanged) {
 		p2pAddress.Service(static_cast<uint16>(serverUdpPort));
 		if (!serverconnect || !serverconnect->RebindServerUDPSocket(p2pAddress)) {
-			delete replacementClientUdp;
 			*msg << CFormat(_("Could not rebind the server UDP port %u; no sockets were "
 					  "changed.\n")) %
 					static_cast<unsigned int>(serverUdpPort);
@@ -1653,7 +1641,6 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint1
 		if (!listensocket || !listensocket->Rebind(p2pAddress)) {
 			p2pAddress.Service(static_cast<uint16>(oldTcpPort + 3));
 			const bool serverUdpRestored = serverconnect->RebindServerUDPSocket(p2pAddress);
-			delete replacementClientUdp;
 			*msg << CFormat(_("Could not rebind the P2P TCP port %u. %s")) %
 					static_cast<unsigned int>(tcpPort) %
 					(serverUdpRestored ? _("The previous listener and server UDP socket "
@@ -1665,8 +1652,31 @@ bool CamuleApp::RebindP2PSockets(bool tcpPortChanged, bool udpPortChanged, uint1
 	}
 
 	if (udpPortChanged) {
-		delete clientudp;
-		clientudp = replacementClientUdp;
+		p2pAddress.Service(udpPort);
+		if (!clientudp || !clientudp->Rebind(p2pAddress)) {
+			bool listenerRestored = true;
+			bool serverUdpRestored = true;
+			if (tcpPortChanged) {
+				p2pAddress.Service(oldTcpPort);
+				listenerRestored = listensocket && listensocket->Rebind(p2pAddress);
+				p2pAddress.Service(static_cast<uint16>(oldTcpPort + 3));
+				serverUdpRestored = serverconnect &&
+						    serverconnect->RebindServerUDPSocket(p2pAddress);
+			}
+			wxString restorationMessage;
+			if (listenerRestored && serverUdpRestored) {
+				restorationMessage = tcpPortChanged
+						    ? _("The previous P2P listeners remain active.\n")
+						    : _("The previous client UDP socket remains active.\n");
+			} else {
+				restorationMessage =
+					_("Some previous P2P sockets could not be restored; restart aMule.\n");
+			}
+			*msg << CFormat(_("Could not rebind the client UDP port %u. %s")) %
+					static_cast<unsigned int>(udpPort) %
+					restorationMessage;
+			return false;
+		}
 	}
 
 	if (tcpPortChanged && thePrefs::GetNetworkED2K() &&

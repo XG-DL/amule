@@ -124,6 +124,16 @@ bool CMuleUDPSocket::Rebind(const amuleIPV4Address &address)
 	return true;
 }
 
+bool CMuleUDPSocket::SetBindAddressIfClosed(const amuleIPV4Address &address)
+{
+	wxMutexLocker lock(m_mutex);
+	if (m_socket) {
+		return false;
+	}
+	m_addr = address;
+	return true;
+}
+
 void CMuleUDPSocket::Close()
 {
 	wxMutexLocker lock(m_mutex);

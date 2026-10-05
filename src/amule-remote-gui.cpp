@@ -1583,24 +1583,27 @@ void CPreferencesRem::ApplyRefresh(const CECPacket *packet)
 
 class CPrefsSetHandler : public CECPacketHandlerBase
 {
+	void AbortPendingRequest() override { delete this; }
+
 	void HandlePacket(const CECPacket *packet) override
 	{
-		if (packet->GetOpCode() != EC_OP_FAILED) {
-			return;
-		}
-		const CECTag *tag = packet->GetTagByName(EC_TAG_STRING);
-		const wxString message = tag ? tag->GetStringData()
-					     : _("The daemon could not apply the connection port changes.");
-		// Refresh the optimistic remote preference view after the daemon rolls back
-		// failed port changes, then show the daemon's explanation on the GUI
-		// thread.
-		if (theApp->glob_prefs) {
-			theApp->glob_prefs->RefreshFromRemote([message]() {
-				wxTheApp->CallAfter([message]() {
-					wxMessageBox(message, _("ERROR"), wxOK | wxICON_ERROR);
+		if (packet->GetOpCode() == EC_OP_FAILED) {
+			const CECTag *tag = packet->GetTagByName(EC_TAG_STRING);
+			const wxString message =
+				tag ? tag->GetStringData()
+				    : _("The daemon could not apply the connection port changes.");
+			// Refresh the optimistic remote preference view after the daemon rolls back
+			// failed port changes, then show the daemon's explanation on the GUI
+			// thread.
+			if (theApp->glob_prefs) {
+				theApp->glob_prefs->RefreshFromRemote([message]() {
+					wxTheApp->CallAfter([message]() {
+						wxMessageBox(message, _("ERROR"), wxOK | wxICON_ERROR);
+					});
 				});
-			});
+			}
 		}
+		delete this;
 	}
 };
 

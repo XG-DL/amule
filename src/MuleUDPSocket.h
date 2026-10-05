@@ -119,6 +119,9 @@ public:
 	static const unsigned UDP_BUFFER_SIZE = 16384;
 
 protected:
+	/** Update the stored address of a socket that is currently closed. */
+	bool SetBindAddressIfClosed(const amuleIPV4Address &address);
+
 	/**
 	 * Called when a packet has been received.
 	 *
