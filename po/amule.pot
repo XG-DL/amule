@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: aMule GIT\n"
 "Report-Msgid-Bugs-To: https://github.com/amule-org/amule/issues\n"
-"POT-Creation-Date: 2026-10-03 23:15+0100\n"
+"POT-Creation-Date: 2026-10-05 20:42+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -518,11 +518,6 @@ msgstr ""
 
 #: src/amule.cpp
 #, c-format
-msgid "Could not bind the client UDP port %u. No sockets were changed.\n"
-msgstr ""
-
-#: src/amule.cpp
-#, c-format
 msgid "Could not rebind the server UDP port %u; no sockets were changed.\n"
 msgstr ""
 
@@ -537,6 +532,23 @@ msgstr ""
 
 #: src/amule.cpp
 msgid "The server UDP socket could not be restored; restart aMule.\n"
+msgstr ""
+
+#: src/amule.cpp
+msgid "The previous P2P listeners remain active.\n"
+msgstr ""
+
+#: src/amule.cpp
+msgid "The previous client UDP socket remains active.\n"
+msgstr ""
+
+#: src/amule.cpp
+msgid "Some previous P2P sockets could not be restored; restart aMule.\n"
+msgstr ""
+
+#: src/amule.cpp
+#, c-format
+msgid "Could not rebind the client UDP port %u. %s"
 msgstr ""
 
 #: src/amule.cpp
