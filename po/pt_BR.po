@@ -15,7 +15,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: aMule\n"
 "Report-Msgid-Bugs-To: https://github.com/amule-org/amule/issues\n"
-"POT-Creation-Date: 2026-10-05 20:42+0100\n"
+"POT-Creation-Date: 2026-10-06 19:09+0200\n"
 "PO-Revision-Date: 2026-10-04 14:56+0000\n"
 "Last-Translator: Marcelo Jimenez <mroberto@users.sourceforge.com>\n"
 "Language-Team: Português (Brasileiro) <pt@li.org>\n"
@@ -605,7 +605,7 @@ msgstr ""
 #: src/amule.cpp
 #, fuzzy, c-format
 msgid "Could not rebind the client UDP port %u. %s"
-msgstr "ERRO: Não pôde ouvir a porta TCP."
+msgstr "Não foi possível excluir a categoria: %s"
 
 #: src/amule.cpp
 msgid "P2P listening sockets rebound; established peer connections were kept."
@@ -4885,8 +4885,13 @@ msgid "Enter here the min disk space desired."
 msgstr "Digite aqui o espaço min. de disco desejado."
 
 #: src/muuli_wdr.cpp
-msgid "Save 10 sources on rare files (< 20 sources)"
+#, fuzzy
+msgid "Save up to 10 HighID sources of rare files (20 or fewer sources) on exit"
 msgstr "Salvar 10 fontes em arquivos raros (< 20 fontes)"
+
+#: src/muuli_wdr.cpp
+msgid "The saved sources are used again only if aMule restarts within 2 hours. LowID sources are not saved: a LowID only identifies a peer on the server that assigned it."
+msgstr ""
 
 #: src/muuli_wdr.cpp src/Statistics.cpp
 msgid "Uploads"
