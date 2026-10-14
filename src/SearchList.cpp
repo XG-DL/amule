@@ -345,6 +345,11 @@ void CSearchList::RemoveResults(wxUIntPtr searchID)
 	}
 
 	// removed owns the detached results until all notifications have returned.
+	// Persist the new set now as well as at shutdown, so an unclean restart cannot
+	// restore a search that the user has already closed.
+	if (!m_shuttingDown) {
+		StoreSearches();
+	}
 }
 
 const wxChar *const CSearchList::s_storedSearchesFilename = wxT("StoredSearches.met");
