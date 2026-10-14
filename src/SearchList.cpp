@@ -402,11 +402,11 @@ bool CSearchList::StoreSearches(bool reportTruncation) const
 	for (uint32_t id : ids) {
 		const CSearchResultList &results = GetSearchResults(id);
 		std::size_t resultCount = results.size();
+		if (reportTruncation && resultCount > MAX_STORED_RESULTS_PER_SEARCH) {
+			AddLogLineC(CFormat(_("Only saving the first %u of %u results for search \"%s\".")) %
+				    MAX_STORED_RESULTS_PER_SEARCH % resultCount % m_searchStrings.at(id));
+		}
 		if (resultCount > MAX_STORED_RESULTS_PER_SEARCH) {
-			if (reportTruncation) {
-				AddLogLineC(CFormat(_("Only saving the first %u of %u results for search \"%s\".")) %
-					    MAX_STORED_RESULTS_PER_SEARCH % resultCount % m_searchStrings.at(id));
-			}
 			resultCount = MAX_STORED_RESULTS_PER_SEARCH;
 		}
 
