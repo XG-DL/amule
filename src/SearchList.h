@@ -297,9 +297,9 @@ public:
 	 * the destructor drains everything via RemoveResults(), so shutdown must save first.
 	 * "View Files" browse tabs are not searches (see GetKnownSearchIds()) and are never
 	 * persisted. Bounded at MAX_STORED_SEARCHES / MAX_STORED_RESULTS_PER_SEARCH; anything
-	 * beyond that is dropped with a log line rather than silently.
+	 * beyond that is dropped with a log line during clean shutdown rather than silently.
 	 */
-	bool StoreSearches() const;
+	bool StoreSearches(bool reportTruncation = true) const;
 
 	/**
 	 * Coalesces search-state changes into a periodic write. Called from the core timer;

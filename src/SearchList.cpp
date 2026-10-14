@@ -353,7 +353,7 @@ void CSearchList::RemoveResults(wxUIntPtr searchID)
 
 const wxChar *const CSearchList::s_storedSearchesFilename = wxT("StoredSearches.met");
 
-bool CSearchList::StoreSearches() const
+bool CSearchList::StoreSearches(bool reportTruncation) const
 {
 	// Same contract as the search-terms dropdown this setting already governs (SearchDlg.cpp):
 	// off means "don't remember", and a search's full result set is a stronger form of that
@@ -389,8 +389,10 @@ bool CSearchList::StoreSearches() const
 	});
 
 	if (ids.size() > MAX_STORED_SEARCHES) {
-		AddLogLineC(CFormat(_("Only saving the %u most recent of %u open searches to %s.")) %
-			    MAX_STORED_SEARCHES % ids.size() % s_storedSearchesFilename);
+		if (reportTruncation) {
+			AddLogLineC(CFormat(_("Only saving the %u most recent of %u open searches to %s.")) %
+				    MAX_STORED_SEARCHES % ids.size() % s_storedSearchesFilename);
+		}
 		ids.erase(ids.begin(), ids.end() - MAX_STORED_SEARCHES);
 	}
 
@@ -401,8 +403,10 @@ bool CSearchList::StoreSearches() const
 		const CSearchResultList &results = GetSearchResults(id);
 		std::size_t resultCount = results.size();
 		if (resultCount > MAX_STORED_RESULTS_PER_SEARCH) {
-			AddLogLineC(CFormat(_("Only saving the first %u of %u results for search \"%s\".")) %
-				    MAX_STORED_RESULTS_PER_SEARCH % resultCount % m_searchStrings.at(id));
+			if (reportTruncation) {
+				AddLogLineC(CFormat(_("Only saving the first %u of %u results for search \"%s\".")) %
+					    MAX_STORED_RESULTS_PER_SEARCH % resultCount % m_searchStrings.at(id));
+			}
 			resultCount = MAX_STORED_RESULTS_PER_SEARCH;
 		}
 
@@ -444,11 +448,11 @@ void CSearchList::StoreSearchesIfDirty(uint64_t uptimeMs)
 	// attempt on every core-timer tick. Keep the dirty flag set if the safe write fails.
 	m_lastStoredSearchesAttemptMs = uptimeMs;
 	try {
-		if (StoreSearches()) {
+		if (StoreSearches(false)) {
 			m_storedSearchesDirty = false;
 		}
 	} catch (const CIOFailureException &e) {
-		AddLogLineC(CFormat("IO error while saving %s: %s") % s_storedSearchesFilename % e.what());
+		AddLogLineC(CFormat(_("IO error while saving %s: %s")) % s_storedSearchesFilename % e.what());
 	}
 }
 
