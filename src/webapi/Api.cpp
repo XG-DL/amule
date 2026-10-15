@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <functional>
 
 #include "PrefsSchema.h"
 #include "SearchJson.h" // WriteSearchResultFields, shared with the SSE payload
@@ -79,6 +80,7 @@
 #include <cctype>
 #include <climits>
 #include <cstdlib>
+#include <random>
 #include <sys/stat.h>
 
 // strncasecmp is in <strings.h> on POSIX; glibc also exposes it via
@@ -116,6 +118,8 @@ void SplitPathAndQuery(const std::string &target, std::string &path, std::string
 		query = target.substr(q + 1);
 	}
 }
+
+std::string QueryOf(const CHttpServer::Request &req);
 
 // Emit `key` as a number, or null when the value is not known. The rule lives in
 // REFERENCE.md under `Unknown values`; this is the one implementation, so a new
@@ -193,6 +197,17 @@ CHttpServer::Response ErrorResponse(unsigned status, const char *code, const cha
 	w.EndObject();
 	FinalizeJsonBody(w, r);
 	return r;
+}
+
+std::string NewHistoryTransferId()
+{
+	static std::mutex mutex;
+	static std::random_device random;
+	std::lock_guard<std::mutex> lock(mutex);
+	std::ostringstream id;
+	for (unsigned i = 0; i < 4; ++i)
+		id << std::hex << random();
+	return id.str();
 }
 
 // RFC 9110 15.5.6 requires an Allow header on a 405. `allow` is the
@@ -699,6 +714,236 @@ bool ParseSearchIdSegment(const std::string &seg, std::uint32_t &out)
 }
 
 bool ParseJsonObjectBody(const std::string &body, picojson::value &out, std::string &err);
+
+// Walk the portable history JSON one entry at a time. The HTTP layer has the
+// bounded upload buffer, but this avoids constructing a second full-document
+// picojson tree before sending bounded EC batches to amuled.
+class HistoryJsonScanner
+{
+public:
+	explicit HistoryJsonScanner(const std::string &input)
+	: m_input(input)
+	{
+	}
+
+	bool Read(const std::function<bool(const std::string &, std::string &)> &emit, std::string &error)
+	{
+		SkipSpace();
+		if (!Take('{'))
+			return Fail(error, "History file must contain a JSON object.");
+		bool haveFormat = false, haveVersion = false, haveEntries = false;
+		std::string format;
+		double version = 0;
+		SkipSpace();
+		if (!Take('}')) {
+			for (;;) {
+				std::string key;
+				if (!ReadString(key) || !TakeAfterSpace(':'))
+					return Fail(error, "History file has invalid object syntax.");
+				if (key == "entries") {
+					if (haveEntries)
+						return Fail(error, "History file repeats its entries field.");
+					haveEntries = true;
+					if (!ReadEntries(emit, error))
+						return false;
+				} else {
+					const size_t start = m_pos;
+					if (!ScanValue(0))
+						return Fail(error, "History file contains invalid JSON.");
+					if (key == "format") {
+						if (haveFormat)
+							return Fail(error,
+								"History file repeats its format field.");
+						picojson::value value;
+						if (!ParseSpan(start, m_pos, value) ||
+							!value.is<std::string>())
+							return Fail(
+								error, "History format field is invalid.");
+						format = value.get<std::string>();
+						haveFormat = true;
+					} else if (key == "version") {
+						if (haveVersion)
+							return Fail(error,
+								"History file repeats its version field.");
+						picojson::value value;
+						if (!ParseSpan(start, m_pos, value) || !value.is<double>())
+							return Fail(
+								error, "History version field is invalid.");
+						version = value.get<double>();
+						haveVersion = true;
+					}
+				}
+				SkipSpace();
+				if (Take('}'))
+					break;
+				if (!Take(','))
+					return Fail(error, "History file has invalid object syntax.");
+				SkipSpace();
+			}
+		}
+		SkipSpace();
+		if (m_pos != m_input.size())
+			return Fail(error, "History file has trailing data.");
+		if (!haveFormat || format != "amule.completed-download-history" || !haveVersion ||
+			version != 1.0 || !haveEntries)
+			return Fail(error, "History file format or version is not supported.");
+		return true;
+	}
+
+private:
+	bool Fail(std::string &error, const char *message)
+	{
+		error = message;
+		return false;
+	}
+	void SkipSpace()
+	{
+		while (m_pos < m_input.size() && (m_input[m_pos] == ' ' || m_input[m_pos] == '\n' ||
+							 m_input[m_pos] == '\r' || m_input[m_pos] == '\t'))
+			++m_pos;
+	}
+	bool Take(char c)
+	{
+		if (m_pos < m_input.size() && m_input[m_pos] == c) {
+			++m_pos;
+			return true;
+		}
+		return false;
+	}
+	bool TakeAfterSpace(char c)
+	{
+		SkipSpace();
+		return Take(c) && (SkipSpace(), true);
+	}
+	bool ReadString(std::string &decoded)
+	{
+		const size_t start = m_pos;
+		if (!Take('"'))
+			return false;
+		while (m_pos < m_input.size()) {
+			const unsigned char c = m_input[m_pos++];
+			if (c == '"') {
+				picojson::value parsed;
+				if (!ParseSpan(start, m_pos, parsed) || !parsed.is<std::string>())
+					return false;
+				decoded = parsed.get<std::string>();
+				return true;
+			}
+			if (c < 0x20)
+				return false;
+			if (c == '\\') {
+				if (m_pos == m_input.size())
+					return false;
+				const char escaped = m_input[m_pos++];
+				if (escaped == 'u') {
+					for (int i = 0; i < 4; ++i) {
+						if (m_pos == m_input.size() ||
+							!std::isxdigit(
+								static_cast<unsigned char>(m_input[m_pos++])))
+							return false;
+					}
+				} else if (escaped != '"' && escaped != '\\' && escaped != '/' &&
+					   escaped != 'b' && escaped != 'f' && escaped != 'n' &&
+					   escaped != 'r' && escaped != 't')
+					return false;
+			}
+		}
+		return false;
+	}
+	bool ScanValue(unsigned depth)
+	{
+		if (depth > 64)
+			return false;
+		SkipSpace();
+		if (m_pos == m_input.size())
+			return false;
+		if (m_input[m_pos] == '"') {
+			std::string ignored;
+			return ReadString(ignored);
+		}
+		if (Take('{')) {
+			SkipSpace();
+			if (Take('}'))
+				return true;
+			for (;;) {
+				std::string ignored;
+				if (!ReadString(ignored) || !TakeAfterSpace(':') || !ScanValue(depth + 1))
+					return false;
+				SkipSpace();
+				if (Take('}'))
+					return true;
+				if (!Take(','))
+					return false;
+				SkipSpace();
+			}
+		}
+		if (Take('[')) {
+			SkipSpace();
+			if (Take(']'))
+				return true;
+			for (;;) {
+				if (!ScanValue(depth + 1))
+					return false;
+				SkipSpace();
+				if (Take(']'))
+					return true;
+				if (!Take(','))
+					return false;
+			}
+		}
+		const size_t start = m_pos;
+		while (m_pos < m_input.size() && m_input[m_pos] != ',' && m_input[m_pos] != ']' &&
+			m_input[m_pos] != '}' && m_input[m_pos] != ' ' && m_input[m_pos] != '\n' &&
+			m_input[m_pos] != '\r' && m_input[m_pos] != '\t')
+			++m_pos;
+		picojson::value primitive;
+		return m_pos > start && ParseSpan(start, m_pos, primitive) &&
+		       !primitive.is<picojson::array>() && !primitive.is<picojson::object>();
+	}
+	bool ReadEntries(
+		const std::function<bool(const std::string &, std::string &)> &emit, std::string &error)
+	{
+		if (!TakeAfterSpace('['))
+			return Fail(error, "History entries must be an array.");
+		picojson::array batch;
+		batch.reserve(512);
+		size_t count = 0;
+		SkipSpace();
+		if (Take(']'))
+			return true;
+		for (;;) {
+			const size_t start = m_pos;
+			if (!ScanValue(0))
+				return Fail(error, "History file contains an invalid entry.");
+			picojson::value entry;
+			if (!ParseSpan(start, m_pos, entry) || !entry.is<picojson::object>())
+				return Fail(error, "History file contains an invalid entry.");
+			batch.push_back(std::move(entry));
+			if (++count > 5000000u)
+				return Fail(error, "History file contains too many records.");
+			if (batch.size() == 512) {
+				if (!emit(picojson::value(batch).serialize(), error))
+					return false;
+				batch.clear();
+			}
+			SkipSpace();
+			if (Take(']'))
+				break;
+			if (!Take(','))
+				return Fail(error, "History entries have invalid array syntax.");
+			SkipSpace();
+		}
+		if (!batch.empty() && !emit(picojson::value(batch).serialize(), error))
+			return false;
+		return true;
+	}
+	bool ParseSpan(size_t start, size_t end, picojson::value &value) const
+	{
+		return !picojson::parse(value, m_input.substr(start, end - start)).size();
+	}
+	const std::string &m_input;
+	size_t m_pos = 0;
+};
 
 } // namespace
 
@@ -1246,6 +1491,665 @@ CHttpServer::Response CApiDispatcher::DispatchToHandler(const CHttpServer::Reque
 			return MethodNotAllowed("POST", "only POST on /geoip/update");
 		}
 		return HandleGeoipUpdate(req);
+	}
+
+	if (path == "/api/v1/completed_download_history/import/start") {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history import start");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto mode = q.find("mode"), size = q.find("total_bytes");
+		if (mode == q.end() || (mode->second != "merge" && mode->second != "replace") ||
+			size == q.end())
+			return ErrorResponse(400, "invalid_transfer", "specify mode and total_bytes");
+		char *end = nullptr;
+		const unsigned long long total = std::strtoull(size->second.c_str(), &end, 10);
+		constexpr std::size_t maxBytes = 64u * 1024u * 1024u;
+		constexpr std::size_t chunkBytes = 512u * 1024u;
+		if (!end || *end || total == 0 || total > maxBytes)
+			return ErrorResponse(413,
+				"history_too_large",
+				"History transfer must be between 1 byte and 64 MiB.");
+		std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+		const auto now = std::chrono::steady_clock::now();
+		for (auto it = m_completedHistoryImports.begin(); it != m_completedHistoryImports.end();) {
+			if (it->second < now)
+				it = m_completedHistoryImports.erase(it);
+			else
+				++it;
+		}
+		for (auto it = m_historyTransfers.begin(); it != m_historyTransfers.end();) {
+			if (!it->second.committing && it->second.expires < now)
+				it = m_historyTransfers.erase(it);
+			else
+				++it;
+		}
+		if (!m_historyTransfers.empty())
+			return ErrorResponse(
+				409, "transfer_busy", "Another history transfer is already in progress.");
+		const std::string id = NewHistoryTransferId();
+		HistoryTransfer transfer;
+		transfer.total_bytes = total;
+		transfer.expires = now + std::chrono::minutes(10);
+		transfer.merge = mode->second == "merge";
+		m_historyTransfers.emplace(id, std::move(transfer));
+		CHttpServer::Response response;
+		response.status = 201;
+		response.content_type = "application/json";
+		response.body = "{\"transfer_id\":\"" + id + "\",\"total_bytes\":" + std::to_string(total) +
+				",\"chunk_bytes\":" + std::to_string(chunkBytes) + "}";
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/transfer/cancel") {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history transfer cancel");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto id = q.find("transfer_id");
+		if (id == q.end())
+			return ErrorResponse(400, "invalid_transfer", "transfer_id is required");
+		bool wasExport = false;
+		{
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			auto transfer = m_historyTransfers.find(id->second);
+			if (transfer == m_historyTransfers.end()) {
+				CHttpServer::Response response;
+				response.status = 204;
+				response.content_type.clear();
+				return response;
+			}
+			if (transfer->second.committing)
+				return ErrorResponse(409,
+					"transfer_committing",
+					"The history import is being applied and cannot be cancelled yet.");
+			wasExport = transfer->second.is_export;
+			m_historyTransfers.erase(transfer);
+		}
+		CECPacket cancel(EC_OP_COMPLETED_HISTORY);
+		cancel.AddTag(
+			CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(wasExport ? 7 : 6)));
+		cancel.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id->second));
+		const CECPacket *cancelResponse = m_app.SendRecvSerialized(&cancel);
+		delete cancelResponse;
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
+	}
+
+	if (path.compare(0,
+		    std::string("/api/v1/completed_download_history/import/chunk/").size(),
+		    "/api/v1/completed_download_history/import/chunk/") == 0) {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history import chunk");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const std::string prefix = "/api/v1/completed_download_history/import/chunk/";
+		const std::string id = path.substr(prefix.size());
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto offsetIt = q.find("offset");
+		char *end = nullptr;
+		const unsigned long long offset =
+			offsetIt == q.end() ? ULLONG_MAX : std::strtoull(offsetIt->second.c_str(), &end, 10);
+		if (offsetIt == q.end() || !end || *end || req.body.empty() || req.body.size() > 512u * 1024u)
+			return ErrorResponse(
+				400, "invalid_chunk", "Each history chunk must contain 1 to 512 KiB.");
+		std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+		auto transfer = m_historyTransfers.find(id);
+		if (transfer == m_historyTransfers.end() || transfer->second.is_export)
+			return ErrorResponse(404,
+				"transfer_not_found",
+				"History import transfer expired or was not found.");
+		if (transfer->second.committing)
+			return ErrorResponse(
+				409, "transfer_committing", "The history import is being applied.");
+		if (transfer->second.expires < std::chrono::steady_clock::now()) {
+			m_historyTransfers.erase(transfer);
+			return ErrorResponse(410, "transfer_expired", "History import transfer expired.");
+		}
+		if (offset < transfer->second.bytes.size()) {
+			const std::size_t start = static_cast<std::size_t>(offset);
+			if (req.body.size() <= transfer->second.bytes.size() - start &&
+				transfer->second.bytes.compare(start, req.body.size(), req.body) == 0) {
+				transfer->second.expires =
+					std::chrono::steady_clock::now() + std::chrono::minutes(10);
+				CHttpServer::Response response;
+				response.status = 204;
+				response.content_type.clear();
+				return response;
+			}
+			return ErrorResponse(409,
+				"invalid_offset",
+				"A repeated history chunk did not match the data already received.");
+		}
+		if (offset != transfer->second.bytes.size() ||
+			transfer->second.bytes.size() > transfer->second.total_bytes ||
+			req.body.size() > 64u * 1024u * 1024u - transfer->second.bytes.size())
+			return ErrorResponse(409,
+				"invalid_offset",
+				"History chunks must arrive in order at the requested offset.");
+		if (req.body.size() > transfer->second.total_bytes - transfer->second.bytes.size())
+			return ErrorResponse(
+				409, "invalid_chunk", "History chunk exceeds the declared transfer size.");
+		transfer->second.bytes.append(req.body);
+		transfer->second.expires = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/import/commit") {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history import commit");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto idIt = q.find("transfer_id");
+		if (idIt == q.end())
+			return ErrorResponse(400, "invalid_transfer", "transfer_id is required");
+		HistoryTransfer transfer;
+		{
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			const auto now = std::chrono::steady_clock::now();
+			for (auto it = m_completedHistoryImports.begin();
+				it != m_completedHistoryImports.end();) {
+				if (it->second < now)
+					it = m_completedHistoryImports.erase(it);
+				else
+					++it;
+			}
+			if (m_completedHistoryImports.find(idIt->second) != m_completedHistoryImports.end()) {
+				CHttpServer::Response response;
+				response.status = 204;
+				response.content_type.clear();
+				return response;
+			}
+			auto it = m_historyTransfers.find(idIt->second);
+			if (it == m_historyTransfers.end() || it->second.is_export)
+				return ErrorResponse(404,
+					"transfer_not_found",
+					"History import transfer expired or was not found.");
+			if (it->second.committing)
+				return ErrorResponse(409,
+					"transfer_committing",
+					"The history import is already being applied.");
+			transfer = std::move(it->second);
+			HistoryTransfer pending;
+			pending.total_bytes = transfer.total_bytes;
+			pending.merge = transfer.merge;
+			pending.expires = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+			pending.committing = true;
+			it->second = std::move(pending);
+		}
+		auto finishImport = [&](bool success) {
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			auto it = m_historyTransfers.find(idIt->second);
+			if (success) {
+				if (it != m_historyTransfers.end() && it->second.committing)
+					m_historyTransfers.erase(it);
+				m_completedHistoryImports[idIt->second] =
+					std::chrono::steady_clock::now() + std::chrono::minutes(10);
+			} else {
+				transfer.expires =
+					std::chrono::steady_clock::now() + std::chrono::minutes(10);
+				m_historyTransfers.insert_or_assign(idIt->second, std::move(transfer));
+			}
+		};
+		if (transfer.bytes.size() != transfer.total_bytes) {
+			finishImport(false);
+			return ErrorResponse(400,
+				"incomplete_transfer",
+				"Uploaded history size does not match the declared transfer size.");
+		}
+		auto makeHistoryAction = [&](uint8 action) {
+			auto packet = std::make_unique<CECPacket>(EC_OP_COMPLETED_HISTORY);
+			packet->AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, action));
+			packet->AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, idIt->second));
+			return packet;
+		};
+		// A repeated HTTP commit may arrive after the core committed but its response was lost.
+		// The core keeps successful transfer IDs briefly so this probe is safe to retry.
+		auto commitProbe = makeHistoryAction(5);
+		const CECPacket *ec_resp = m_app.SendRecvSerialized(commitProbe.get());
+		if (ec_resp && ec_resp->GetOpCode() != EC_OP_FAILED) {
+			delete ec_resp;
+			finishImport(true);
+			CHttpServer::Response response;
+			response.status = 204;
+			response.content_type.clear();
+			return response;
+		}
+		delete ec_resp;
+		auto begin = makeHistoryAction(3);
+		begin->AddTag(CECTag(
+			EC_TAG_FILES_COMPLETED_HISTORY_MERGE, static_cast<uint8>(transfer.merge ? 1 : 0)));
+		ec_resp = m_app.SendRecvSerialized(begin.get());
+		if (!ec_resp || ec_resp->GetOpCode() == EC_OP_FAILED) {
+			std::string message = "Could not begin the core history import.";
+			if (ec_resp) {
+				if (const CECTag *tag = ec_resp->GetTagByName(EC_TAG_STRING))
+					message = tag->GetStringData().ToStdString();
+				delete ec_resp;
+			}
+			finishImport(false);
+			return ErrorResponse(503, "ec_unavailable", message.c_str());
+		}
+		delete ec_resp;
+		std::string scanError;
+		const bool validHistory =
+			HistoryJsonScanner(transfer.bytes)
+				.Read(
+					[&](const std::string &batchJson, std::string &batchError) {
+						auto chunk = makeHistoryAction(4);
+						chunk->AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_DATA,
+							wxString::FromUTF8(batchJson.c_str())));
+						const CECPacket *batchResponse =
+							m_app.SendRecvSerialized(chunk.get());
+						if (!batchResponse ||
+							batchResponse->GetOpCode() == EC_OP_FAILED) {
+							batchError =
+								"Core rejected a completed-history batch.";
+							if (batchResponse) {
+								if (const CECTag *tag =
+										batchResponse->GetTagByName(
+											EC_TAG_STRING))
+									batchError = tag->GetStringData()
+											     .ToStdString();
+								delete batchResponse;
+							}
+							return false;
+						}
+						delete batchResponse;
+						return true;
+					},
+					scanError);
+		if (!validHistory) {
+			auto abort = makeHistoryAction(6);
+			const CECPacket *ignored = m_app.SendRecvSerialized(abort.get());
+			delete ignored;
+			finishImport(false);
+			return ErrorResponse(400, "invalid_history", scanError.c_str());
+		}
+		auto commit = makeHistoryAction(5);
+		ec_resp = m_app.SendRecvSerialized(commit.get());
+		if (!ec_resp) {
+			finishImport(false);
+			return ErrorResponse(503,
+				"ec_unavailable",
+				"EC roundtrip failed; retry the history import commit.");
+		}
+		if (ec_resp->GetOpCode() == EC_OP_FAILED) {
+			std::string message = "aMule core could not commit the history file.";
+			if (const CECTag *tag = ec_resp->GetTagByName(EC_TAG_STRING))
+				message = tag->GetStringData().ToStdString();
+			delete ec_resp;
+			finishImport(false);
+			return ErrorResponse(400, "invalid_history", message.c_str());
+		}
+		delete ec_resp;
+		finishImport(true);
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/export/start") {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history export start");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		std::string id;
+		{
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			const auto now = std::chrono::steady_clock::now();
+			for (auto it = m_historyTransfers.begin(); it != m_historyTransfers.end();) {
+				if (!it->second.committing && it->second.expires < now)
+					it = m_historyTransfers.erase(it);
+				else
+					++it;
+			}
+			if (!m_historyTransfers.empty())
+				return ErrorResponse(409,
+					"transfer_busy",
+					"Another history transfer is already in progress.");
+			id = NewHistoryTransferId();
+			HistoryTransfer pending;
+			pending.expires = now + std::chrono::minutes(10);
+			pending.is_export = true;
+			m_historyTransfers.emplace(id, std::move(pending));
+		}
+		std::string bytes =
+			"{\"format\":\"amule.completed-download-history\",\"version\":1,\"entries\":[";
+		CECPacket metadata(EC_OP_COMPLETED_HISTORY);
+		metadata.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(1)));
+		metadata.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+		auto endCoreExport = [&]() {
+			CECPacket endReq(EC_OP_COMPLETED_HISTORY);
+			endReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(7)));
+			endReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+			const CECPacket *endResp = m_app.SendRecvSerialized(&endReq);
+			delete endResp;
+		};
+		const CECPacket *ec_resp = m_app.SendRecvSerialized(&metadata);
+		if (!ec_resp || ec_resp->GetOpCode() == EC_OP_FAILED) {
+			delete ec_resp;
+			endCoreExport();
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			m_historyTransfers.erase(id);
+			return ErrorResponse(503,
+				"ec_unavailable",
+				"Could not read completed-history metadata from aMule core.");
+		}
+		const CECTag *countTag = ec_resp->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_TOTAL);
+		if (!countTag) {
+			delete ec_resp;
+			endCoreExport();
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			m_historyTransfers.erase(id);
+			return ErrorResponse(502,
+				"invalid_core_response",
+				"aMule core returned incomplete history metadata.");
+		}
+		const uint64_t totalRecords = countTag->GetInt();
+		delete ec_resp;
+		constexpr uint32_t recordsPerBatch = 512;
+		for (uint64_t offset = 0; offset < totalRecords; offset += recordsPerBatch) {
+			CECPacket batchReq(EC_OP_COMPLETED_HISTORY);
+			batchReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(2)));
+			batchReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+			batchReq.AddTag(
+				CECTag(EC_TAG_FILES_COMPLETED_HISTORY_OFFSET, static_cast<uint32>(offset)));
+			batchReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_LIMIT, recordsPerBatch));
+			ec_resp = m_app.SendRecvSerialized(&batchReq);
+			const CECTag *batchData =
+				ec_resp && ec_resp->GetOpCode() != EC_OP_FAILED
+					? ec_resp->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_DATA)
+					: nullptr;
+			if (!batchData) {
+				delete ec_resp;
+				CECPacket endReq(EC_OP_COMPLETED_HISTORY);
+				endReq.AddTag(
+					CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(7)));
+				endReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+				const CECPacket *ignored = m_app.SendRecvSerialized(&endReq);
+				delete ignored;
+				std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+				m_historyTransfers.erase(id);
+				return ErrorResponse(503,
+					"ec_unavailable",
+					"Could not read a completed-history batch from aMule core.");
+			}
+			const wxScopedCharBuffer utf8 = batchData->GetStringData().ToUTF8();
+			const std::string batchJson(utf8.data(), utf8.length());
+			delete ec_resp;
+			picojson::value batchValue;
+			if (!picojson::parse(batchValue, batchJson).empty() ||
+				!batchValue.is<picojson::array>()) {
+				CECPacket endReq(EC_OP_COMPLETED_HISTORY);
+				endReq.AddTag(
+					CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(7)));
+				endReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+				const CECPacket *ignored = m_app.SendRecvSerialized(&endReq);
+				delete ignored;
+				std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+				m_historyTransfers.erase(id);
+				return ErrorResponse(502,
+					"invalid_core_response",
+					"aMule core returned an invalid history batch.");
+			}
+			const auto &batchArray = batchValue.get<picojson::array>();
+			const size_t expected = static_cast<size_t>(
+				std::min<uint64_t>(recordsPerBatch, totalRecords - offset));
+			if (batchArray.size() != expected || batchJson.size() < 2) {
+				CECPacket endReq(EC_OP_COMPLETED_HISTORY);
+				endReq.AddTag(
+					CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(7)));
+				endReq.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, id));
+				const CECPacket *ignored = m_app.SendRecvSerialized(&endReq);
+				delete ignored;
+				std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+				m_historyTransfers.erase(id);
+				return ErrorResponse(502,
+					"invalid_core_response",
+					"aMule core returned an incomplete history batch.");
+			}
+			if (offset != 0)
+				bytes.push_back(',');
+			bytes.append(batchJson, 1, batchJson.size() - 2);
+			if (bytes.size() > 64u * 1024u * 1024u) {
+				endCoreExport();
+				std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+				m_historyTransfers.erase(id);
+				return ErrorResponse(413,
+					"history_too_large",
+					"History exceeds the 64 MiB portable transfer limit.");
+			}
+		}
+		bytes += "]}";
+		endCoreExport();
+		constexpr std::size_t maxBytes = 64u * 1024u * 1024u;
+		if (bytes.empty() || bytes.size() > maxBytes) {
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			m_historyTransfers.erase(id);
+			return ErrorResponse(413,
+				"history_too_large",
+				"History exceeds the 64 MiB portable transfer limit.");
+		}
+		const std::size_t totalBytes = bytes.size();
+		{
+			std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+			auto it = m_historyTransfers.find(id);
+			if (it == m_historyTransfers.end())
+				return ErrorResponse(
+					410, "transfer_expired", "History export transfer expired.");
+			it->second.bytes = std::move(bytes);
+			it->second.total_bytes = totalBytes;
+			it->second.expires = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+		}
+		CHttpServer::Response response;
+		response.status = 201;
+		response.content_type = "application/json";
+		response.body = "{\"transfer_id\":\"" + id +
+				"\",\"total_bytes\":" + std::to_string(totalBytes) +
+				",\"chunk_bytes\":524288}";
+		return response;
+	}
+
+	if (path.compare(0,
+		    std::string("/api/v1/completed_download_history/export/chunk/").size(),
+		    "/api/v1/completed_download_history/export/chunk/") == 0) {
+		if (req.method != "GET")
+			return MethodNotAllowed("GET", "only GET on history export chunk");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const std::string prefix = "/api/v1/completed_download_history/export/chunk/";
+		const std::string id = path.substr(prefix.size());
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto offsetIt = q.find("offset");
+		char *end = nullptr;
+		const unsigned long long offset =
+			offsetIt == q.end() ? ULLONG_MAX : std::strtoull(offsetIt->second.c_str(), &end, 10);
+		if (offsetIt == q.end() || !end || *end)
+			return ErrorResponse(400, "invalid_offset", "A numeric offset is required.");
+		std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+		auto transfer = m_historyTransfers.find(id);
+		if (transfer == m_historyTransfers.end() || !transfer->second.is_export)
+			return ErrorResponse(404,
+				"transfer_not_found",
+				"History export transfer expired or was not found.");
+		if (transfer->second.expires < std::chrono::steady_clock::now()) {
+			m_historyTransfers.erase(transfer);
+			return ErrorResponse(410, "transfer_expired", "History export transfer expired.");
+		}
+		if (offset > transfer->second.bytes.size())
+			return ErrorResponse(416, "invalid_offset", "Offset is beyond the history file.");
+		if (offset > transfer->second.exported_bytes)
+			return ErrorResponse(416, "invalid_offset", "Export chunks must be read in order.");
+		const std::size_t count = std::min<std::size_t>(
+			512u * 1024u, transfer->second.bytes.size() - static_cast<std::size_t>(offset));
+		CHttpServer::Response response;
+		response.status = 200;
+		response.content_type = "application/octet-stream";
+		response.body.assign(transfer->second.bytes.data() + offset, count);
+		response.headers["X-History-Total-Bytes"] = std::to_string(transfer->second.bytes.size());
+		response.headers["X-History-Next-Offset"] = std::to_string(offset + count);
+		transfer->second.expires = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+		if (offset == transfer->second.exported_bytes) {
+			transfer->second.exported_bytes = offset + count;
+			if (transfer->second.exported_bytes == transfer->second.bytes.size())
+				transfer->second.export_ready_to_complete = true;
+		}
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/export/complete") {
+		if (req.method != "POST")
+			return MethodNotAllowed("POST", "only POST on history export complete");
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		const auto q = web_api_path::ParseQuery(QueryOf(req));
+		const auto id = q.find("transfer_id");
+		if (id == q.end())
+			return ErrorResponse(400, "invalid_transfer", "transfer_id is required");
+		std::lock_guard<std::mutex> lock(m_historyTransferMutex);
+		auto transfer = m_historyTransfers.find(id->second);
+		if (transfer == m_historyTransfers.end() || !transfer->second.is_export)
+			return ErrorResponse(404,
+				"transfer_not_found",
+				"History export transfer expired or was not found.");
+		if (!transfer->second.export_ready_to_complete)
+			return ErrorResponse(409,
+				"incomplete_export",
+				"Read every history chunk before completing the export.");
+		m_historyTransfers.erase(transfer);
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/clear") {
+		if (req.method != "POST") {
+			return MethodNotAllowed("POST", "only POST on /completed_download_history/clear");
+		}
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		auto ec_req = std::make_unique<CECPacket>(EC_OP_SET_PREFERENCES, EC_DETAIL_FULL);
+		CECTag group(EC_TAG_PREFS_FILES, static_cast<std::uint32_t>(0));
+		group.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_CLEAR, static_cast<std::uint8_t>(1)));
+		ec_req->AddTag(group);
+		const CECPacket *ec_resp = m_app.SendRecvSerialized(ec_req.get());
+		if (!ec_resp)
+			return ErrorResponse(503, "ec_unavailable", "EC roundtrip failed");
+		if (ec_resp->GetOpCode() == EC_OP_FAILED) {
+			std::string message = "aMule core could not clear completed-download history.";
+			if (const CECTag *tag = ec_resp->GetTagByName(EC_TAG_STRING))
+				message = tag->GetStringData().ToStdString();
+			delete ec_resp;
+			return ErrorResponse(500, "history_clear_failed", message.c_str());
+		}
+		delete ec_resp;
+		(void)RefresherTick(m_app, m_state);
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/export") {
+		if (req.method != "GET") {
+			return MethodNotAllowed("GET", "only GET on /completed_download_history/export");
+		}
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		auto ec_req = std::make_unique<CECPacket>(EC_OP_COMPLETED_HISTORY);
+		const CECPacket *ec_resp = m_app.SendRecvSerialized(ec_req.get());
+		if (!ec_resp)
+			return ErrorResponse(503, "ec_unavailable", "EC roundtrip failed");
+		if (ec_resp->GetOpCode() == EC_OP_FAILED) {
+			delete ec_resp;
+			return ErrorResponse(400, "amuled_rejected", "amuled rejected the operation");
+		}
+		const CECTag *data = ec_resp->GetTagByName(EC_TAG_STRING);
+		if (!data) {
+			delete ec_resp;
+			return ErrorResponse(502, "invalid_core_response", "amuled returned no history data");
+		}
+		CHttpServer::Response response;
+		response.status = 200;
+		response.content_type = "application/json; charset=utf-8";
+		response.headers["Content-Disposition"] = "attachment; filename=amule-completed-history.json";
+		response.body = data->GetStringData().ToStdString();
+		delete ec_resp;
+		return response;
+	}
+
+	if (path == "/api/v1/completed_download_history/import") {
+		if (req.method != "POST") {
+			return MethodNotAllowed("POST", "only POST on /completed_download_history/import");
+		}
+		auto a = Authenticate(req);
+		if (!a.ok)
+			return a.rejection;
+		if (auto rej = RequireAdmin(a))
+			return *rej;
+		std::string ignoredPath, query;
+		SplitPathAndQuery(req.target, ignoredPath, query);
+		const bool merge = query == "mode=merge";
+		if (!merge && query != "mode=replace") {
+			return ErrorResponse(400, "invalid_mode", "specify mode=merge or mode=replace");
+		}
+		auto ec_req = std::make_unique<CECPacket>(EC_OP_COMPLETED_HISTORY);
+		ec_req->AddTag(CECTag(EC_TAG_STRING, wxString::FromUTF8(req.body)));
+		ec_req->AddTag(CECTag(
+			EC_TAG_FILES_COMPLETED_HISTORY_MERGE, static_cast<std::uint8_t>(merge ? 1 : 0)));
+		const CECPacket *ec_resp = m_app.SendRecvSerialized(ec_req.get());
+		if (!ec_resp)
+			return ErrorResponse(503, "ec_unavailable", "EC roundtrip failed");
+		if (ec_resp->GetOpCode() == EC_OP_FAILED) {
+			std::string message = "amuled rejected the history file";
+			if (const CECTag *tag = ec_resp->GetTagByName(EC_TAG_STRING))
+				message = tag->GetStringData().ToStdString();
+			delete ec_resp;
+			return ErrorResponse(400, "invalid_history", message.c_str());
+		}
+		delete ec_resp;
+		CHttpServer::Response response;
+		response.status = 204;
+		response.content_type.clear();
+		return response;
 	}
 
 	// re-hash one shared file against its on-disk data. Matched before the

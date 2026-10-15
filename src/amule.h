@@ -77,6 +77,7 @@ class CListenSocket;
 class CClientList;
 class CKnownFileList;
 class CHashListFile;
+class CCompletedDownloadHistory;
 class CSearchList;
 class CBrowseManager;
 class CClientCreditsList;
@@ -450,6 +451,7 @@ public:
 	CClientList *clientlist;
 	CKnownFileList *knownfiles;
 	CHashListFile *canceledfiles;
+	CCompletedDownloadHistory *completedDownloadHistory;
 	CSearchList *searchlist;
 	//! Every "View Files" browse in flight. Owns their whole lifecycle; see
 	//! CBrowseManager.

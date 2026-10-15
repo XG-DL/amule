@@ -57,6 +57,7 @@
 #include "ClientList.h"
 #include "ChatSessionStore.h"
 #include "kademlia/utils/LookupDiagnosticsEC.h"
+#include "CompletedDownloadHistory.h"
 #include "ClientCreditsList.h" // Needed for CClientCreditsList
 #include "ClientCredits.h"     // Needed for CClientCredits, ClientMetaStruct
 #ifdef ENABLE_IP2COUNTRY
@@ -4056,6 +4057,140 @@ CECPacket *CECServerSocket::ProcessRequest2(const CECPacket *request)
 	case EC_OP_DOWNLOAD_SEARCH_RESULT:
 		response = Get_EC_Response_Search_Results_Download(request);
 		break;
+	case EC_OP_COMPLETED_HISTORY: {
+		response = new CECPacket(EC_OP_COMPLETED_HISTORY);
+		if (!theApp->completedDownloadHistory) {
+			delete response;
+			response = new CECPacket(EC_OP_FAILED);
+			response->AddTag(CECTag(EC_TAG_STRING, "Completed download history is unavailable."));
+			break;
+		}
+		const CECTag *actionTag = request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_ACTION);
+		if (actionTag) {
+			const uint32 action = actionTag->GetInt();
+			const CECTag *transferTag =
+				request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER);
+			const wxString transferIdWx = transferTag ? transferTag->GetStringData() : wxString();
+			const std::string transferId = transferIdWx.ToStdString();
+			std::string error;
+			switch (action) {
+			case 1: { // Start an ordered, revision-checked export.
+				size_t total = 0;
+				uint64 revision = 0;
+				if (!theApp->completedDownloadHistory->BeginExport(
+					    transferId, total, revision, error)) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(CECTag(EC_TAG_STRING, error));
+					break;
+				}
+				response->AddTag(CECTag(
+					EC_TAG_FILES_COMPLETED_HISTORY_TOTAL, static_cast<uint32>(total)));
+				break;
+			}
+			case 2: { // Export a bounded JSON array of records.
+				const CECTag *offsetTag =
+					request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_OFFSET);
+				const CECTag *limitTag =
+					request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_LIMIT);
+				if (!offsetTag || !limitTag || transferId.empty()) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(
+						CECTag(EC_TAG_STRING, "Missing history batch range."));
+					break;
+				}
+				std::string json;
+				size_t total = 0;
+				if (!theApp->completedDownloadHistory->ExportJsonBatch(transferId,
+					    offsetTag->GetInt(),
+					    limitTag->GetInt(),
+					    json,
+					    total,
+					    error)) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(CECTag(EC_TAG_STRING, error));
+					break;
+				}
+				response->AddTag(CECTag(
+					EC_TAG_FILES_COMPLETED_HISTORY_TOTAL, static_cast<uint32>(total)));
+				response->AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_DATA,
+					wxString::FromUTF8(json.c_str())));
+				break;
+			}
+			case 3: { // Begin an atomic import.
+				const CECTag *mode =
+					request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_MERGE);
+				if (!theApp->completedDownloadHistory->BeginImport(
+					    transferId, mode && mode->GetInt() != 0, error)) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(CECTag(EC_TAG_STRING, error));
+				}
+				break;
+			}
+			case 4: { // Add one validated bounded batch to staging.
+				const CECTag *data =
+					request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_DATA);
+				if (!data ||
+					!theApp->completedDownloadHistory->ImportJsonBatch(transferId,
+						data ? data->GetStringData().ToStdString() : std::string(),
+						error)) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(CECTag(
+						EC_TAG_STRING, data ? error : "Missing history batch data."));
+				}
+				break;
+			}
+			case 5: // Commit after every batch was received.
+				if (!theApp->completedDownloadHistory->CommitImport(transferId, error)) {
+					delete response;
+					response = new CECPacket(EC_OP_FAILED);
+					response->AddTag(CECTag(EC_TAG_STRING, error));
+				}
+				break;
+			case 6:
+				theApp->completedDownloadHistory->AbortImport(transferId);
+				break;
+			case 7:
+				theApp->completedDownloadHistory->EndExport(transferId);
+				break;
+			default:
+				delete response;
+				response = new CECPacket(EC_OP_FAILED);
+				response->AddTag(
+					CECTag(EC_TAG_STRING, "Unknown completed-history transfer action."));
+				break;
+			}
+			break;
+		}
+		const CECTag *data = request->GetTagByName(EC_TAG_STRING);
+		if (!data) {
+			std::string json, error;
+			if (!theApp->completedDownloadHistory->ExportJson(json, error)) {
+				delete response;
+				response = new CECPacket(EC_OP_FAILED);
+				response->AddTag(CECTag(EC_TAG_STRING, error));
+				break;
+			}
+			response->AddTag(CECTag(EC_TAG_STRING, wxString::FromUTF8(json.c_str())));
+		} else {
+			const CECTag *mode = request->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_MERGE);
+			std::string error;
+			const wxScopedCharBuffer utf8 = data->GetStringData().ToUTF8();
+			if (!theApp->completedDownloadHistory->ImportJson(
+				    std::string(utf8.data(), utf8.length()),
+				    mode && mode->GetInt() != 0,
+				    error)) {
+				delete response;
+				response = new CECPacket(EC_OP_FAILED);
+				response->AddTag(CECTag(EC_TAG_STRING, error));
+			}
+		}
+		break;
+	}
 	// Preferences
 	case EC_OP_GET_PREFERENCES:
 		response = new CEC_Prefs_Packet(

@@ -275,7 +275,13 @@ function ResultsPane({ tab, categories }) {
     { key: "type", label: t("search_type"), width: "100px", sortable: true,
       sortVal: (r) => r.file_type || "", cell: (r) => fileTypeLabel(r.file_type) },
     { key: "status", label: t("downloads_status_label"), width: "120px", sortable: true,
-      sortVal: (r) => r.status || "", cell: (r) => searchStatusBadge(r.status) },
+      sortVal: (r) => r.status || "", cell: (r) => html`
+        <span class="search-result-state">
+          ${searchStatusBadge(r.status)}
+          ${r.currently_shared ? html`<${Badge} title=${t("search_history_shared_title")}>${t("search_history_shared_short")}<//>` : null}
+          ${!r.currently_shared && r.available_locally ? html`<${Badge} title=${t("search_history_local_title")}>${t("search_history_local_short")}<//>` : null}
+          ${!r.currently_shared && !r.available_locally && r.completed_before ? html`<${Badge} title=${t("search_history_completed_title")}>${t("search_history_completed_short")}<//>` : null}
+        </span>` },
     // Browse-only: the folder inside the peer's share, empty on every
     // server/Kad hit. Sorts folder-then-name, like the desktop.
     { key: "directory", label: t("search_directory"), width: "180px", sortable: true,
@@ -427,7 +433,8 @@ function field(label, control, cls = "") {
 // "new" (fresh remote hit) shows nothing to keep the common case clean.
 function searchStatusBadge(s) {
   if (!s || s === "new") return null;
-  const cls = s === "downloaded" ? "downloading" : s === "queued" ? "waiting"
+  const cls = s === "queued" ? "waiting"
     : (s === "canceled" || s === "queued_canceled") ? "stopped" : "";
-  return html`<${Badge} kind=${cls}>${t("search_status_" + s)}<//>`;
+  const label = s === "downloaded" ? t("search_status_known") : t("search_status_" + s);
+  return html`<${Badge} kind=${cls}>${label}<//>`;
 }

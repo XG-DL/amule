@@ -254,6 +254,10 @@ public:
 	// Whether the Search tab's Name field keeps a dropdown history of past
 	// queries (amule-org/amule#641). Query history only -- not the results.
 	static bool RememberSearchHistory() { return s_rememberSearchHistory; }
+	static uint32 GetCompletedHistoryRetentionDays() { return s_completedHistoryRetentionDays; }
+	static bool IsCompletedHistoryEnabled() { return s_completedHistoryEnabled; }
+	static void SetCompletedHistoryEnabled(bool enabled) { s_completedHistoryEnabled = enabled; }
+	static void SetCompletedHistoryRetentionDays(uint32 days);
 	static void SetMinToTray(bool val) { s_mintotray = val; }
 	static bool UseTrayIcon() { return s_trayiconenabled; }
 	static void SetUseTrayIcon(bool val) { s_trayiconenabled = val; }
@@ -977,6 +981,8 @@ protected:
 	static bool s_mintotray;
 	static bool s_notify;
 	static bool s_rememberSearchHistory;
+	static uint32 s_completedHistoryRetentionDays;
+	static bool s_completedHistoryEnabled;
 	static bool s_trayiconenabled;
 	static bool s_addnewfilespaused;
 	static bool s_addserversfromserver;

@@ -30,6 +30,7 @@
 
 #include "KnownFile.h" // Needed for CAbstractFile
 #include "SearchSourceCount.h"
+#include <chrono>
 #include <memory>
 #include <optional>
 
@@ -160,6 +161,15 @@ public:
 	enum DownloadStatus GetDownloadStatus() const { return m_downloadStatus; }
 	/** Set download status according to the global lists of knownfile, partfiles, canceledfiles. */
 	void SetDownloadStatus();
+#ifdef CLIENT_GUI
+	bool WasCompletedBefore() const { return m_completedBefore; }
+	bool IsAvailableLocally() const { return m_availableLocally; }
+	bool IsCurrentlyShared() const { return m_currentlyShared; }
+#else
+	bool WasCompletedBefore() const;
+	bool IsAvailableLocally() const;
+	bool IsCurrentlyShared() const;
+#endif
 	/** Set download status directly. */
 	void SetDownloadStatus(enum DownloadStatus s) { m_downloadStatus = s; }
 
@@ -272,8 +282,18 @@ private:
 #endif
 	//! Specifies if the result is from a kademlia search.
 	bool m_kademlia;
+	// Search results are serialized repeatedly by API refreshes. Cache this filesystem probe
+	// briefly so each refresh does not stat every result again.
+	mutable std::chrono::steady_clock::time_point m_localAvailabilityCheckedAt{};
+	mutable bool m_localAvailabilityCached = false;
+	mutable bool m_localAvailabilityValue = false;
 	//! The download status.
 	enum DownloadStatus m_downloadStatus;
+#ifdef CLIENT_GUI
+	bool m_completedBefore = false;
+	bool m_availableLocally = false;
+	bool m_currentlyShared = false;
+#endif
 
 	//! Directory where file is stored (when it is part of a remote shared files list).
 	wxString m_directory;

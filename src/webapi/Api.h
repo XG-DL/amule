@@ -37,7 +37,9 @@
 #include <ec/cpp/ECCodes.h> // ec_opcode_t, for the shared search-op sender
 
 #include <ctime>
+#include <chrono>
 #include <map>
+#include <mutex>
 #include <utility>
 
 class CECTag;
@@ -339,6 +341,21 @@ private:
 	// should not lock the user out, but a credential-stuffing attempt burning through stolen
 	// bearer tokens DOES need a brake. Default 30 failures in 60 s -> 5 min lockout.
 	webapi::CRateLimiter m_authRateLimiter;
+
+	struct HistoryTransfer
+	{
+		std::string bytes;
+		std::chrono::steady_clock::time_point expires;
+		std::uint64_t total_bytes = 0;
+		std::uint64_t exported_bytes = 0;
+		bool is_export = false;
+		bool export_ready_to_complete = false;
+		bool merge = false;
+		bool committing = false;
+	};
+	std::mutex m_historyTransferMutex;
+	std::map<std::string, HistoryTransfer> m_historyTransfers;
+	std::map<std::string, std::chrono::steady_clock::time_point> m_completedHistoryImports;
 
 	// Lazy-fetch TTL caches. Each stores the snapshot value PLUS the wall-clock time at fetch,
 	// so handlers render `snapshot_at` against actual freshness rather than the refresher's

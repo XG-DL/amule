@@ -706,6 +706,18 @@ public:
 	{
 		return AssignIfExist(EC_TAG_PARTFILE_STATUS, target);
 	}
+	bool CompletedBefore(bool *target = 0) const
+	{
+		return AssignIfExist(EC_TAG_SEARCHFILE_COMPLETED_BEFORE, target);
+	}
+	bool AvailableLocally(bool *target = 0) const
+	{
+		return AssignIfExist(EC_TAG_SEARCHFILE_AVAILABLE_LOCALLY, target);
+	}
+	bool CurrentlyShared(bool *target = 0) const
+	{
+		return AssignIfExist(EC_TAG_SEARCHFILE_CURRENTLY_SHARED, target);
+	}
 	bool GetRating(uint8 &target) const { return AssignIfExist(EC_TAG_KNOWNFILE_RATING, target); }
 
 	// Browse ("View Files") source info: the peer's id/port and the shared

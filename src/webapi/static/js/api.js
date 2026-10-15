@@ -64,7 +64,7 @@ function markSessionDead(reason) {
   if (onUnauthorized) onUnauthorized(reason);
 }
 
-async function request(method, path, { body, useEtag = false, noGate = false } = {}) {
+async function request(method, path, { body, useEtag = false, noGate = false, rawBody = false, rawResponse = false } = {}) {
   if (sessionDead && !noGate) {
     throw new ApiError(401, "unauthorized", "session ended");
   }
@@ -82,8 +82,8 @@ async function request(method, path, { body, useEtag = false, noGate = false } =
 
   const init = { method, headers, credentials: "include" };
   if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(body);
+    headers["Content-Type"] = rawBody ? "application/octet-stream" : "application/json";
+    init.body = rawBody ? body : JSON.stringify(body);
   }
 
   let resp;
@@ -99,6 +99,10 @@ async function request(method, path, { body, useEtag = false, noGate = false } =
 
   // No-body success (e.g. 204).
   if (resp.status === 204) return {};
+
+  if (rawResponse && resp.ok) {
+    return { bytes: new Uint8Array(await resp.arrayBuffer()), headers: resp.headers };
+  }
 
   const text = await resp.text();
   let payload = null;
@@ -148,6 +152,8 @@ export const api = {
     request("GET", path + (path.includes("?") ? "&" : "?") + "limit=" + LIMIT_ALL,
             { useEtag: true, ...opts }),
   post: (path, body) => request("POST", path, { body }),
+  postBytes: (path, bytes) => request("POST", path, { body: bytes, rawBody: true }),
+  getBytes: (path) => request("GET", path, { rawResponse: true }),
   patch: (path, body) => request("PATCH", path, { body }),
   del: (path, body) => request("DELETE", path, { body }),
 

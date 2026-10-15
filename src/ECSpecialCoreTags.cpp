@@ -549,6 +549,9 @@ CEC_SearchFile_Tag::CEC_SearchFile_Tag(
 		AddTag(CECTag(EC_TAG_SEARCHFILE_KAD_SOURCES, counts->Kad()), valuemap);
 	}
 	AddTag(CECTag(EC_TAG_PARTFILE_STATUS, (uint32)file->GetDownloadStatus()), valuemap);
+	AddTag(CECTag(EC_TAG_SEARCHFILE_COMPLETED_BEFORE, file->WasCompletedBefore()), valuemap);
+	AddTag(CECTag(EC_TAG_SEARCHFILE_AVAILABLE_LOCALLY, file->IsAvailableLocally()), valuemap);
+	AddTag(CECTag(EC_TAG_SEARCHFILE_CURRENTLY_SHARED, file->IsCurrentlyShared()), valuemap);
 
 	// On-demand Kad community ratings/comments for this result, reusing the partfile tags.
 	// Emitted before the UPDATE early-return so the flag's start -> finish and the notes

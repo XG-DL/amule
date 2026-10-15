@@ -29,6 +29,9 @@
 #include "config.h" // Needed for ENABLE_VERSION_CHECK
 #include "Preferences.h"
 #include "amule.h"
+#ifndef CLIENT_GUI
+#include "CompletedDownloadHistory.h"
+#endif
 #include "IP2Country.h"     // For CIP2Country status (#440 remote GeoIP config)
 #include "SharedFileList.h" // for EnableDirectoryWatcher on the apply path
 
@@ -359,6 +362,10 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		if (thePrefs::GetEndgame()) {
 			filePrefs.AddTag(CECEmptyTag(EC_TAG_FILES_ENDGAME));
 		}
+		filePrefs.AddTag(CECTag(
+			EC_TAG_FILES_COMPLETED_HISTORY_ENABLED, thePrefs::IsCompletedHistoryEnabled()));
+		filePrefs.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_RETENTION,
+			thePrefs::GetCompletedHistoryRetentionDays()));
 		if (thePrefs::GetNewAutoUp()) {
 			filePrefs.AddTag(CECEmptyTag(EC_TAG_FILES_NEW_AUTO_UL_PRIO));
 		}
@@ -804,6 +811,18 @@ void CEC_Prefs_Packet::Apply() const
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetNewAutoDown, EC_TAG_FILES_NEW_AUTO_DL_PRIO);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetPreviewPrio, EC_TAG_FILES_PREVIEW_PRIO);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetEndgame, EC_TAG_FILES_ENDGAME);
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_ENABLED)) != nullptr) {
+			thePrefs::SetCompletedHistoryEnabled(oneTag->GetInt() != 0);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_RETENTION)) != nullptr) {
+			thePrefs::SetCompletedHistoryRetentionDays(oneTag->GetInt());
+		}
+#ifndef CLIENT_GUI
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_CLEAR)) != nullptr &&
+			oneTag->GetInt() != 0 && theApp->completedDownloadHistory) {
+			theApp->completedDownloadHistory->Clear();
+		}
+#endif
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetNewAutoUp, EC_TAG_FILES_NEW_AUTO_UL_PRIO);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetStartNextFile, EC_TAG_FILES_START_NEXT_PAUSED);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetStartNextFileSame, EC_TAG_FILES_RESUME_SAME_CAT);

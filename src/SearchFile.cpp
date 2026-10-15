@@ -32,6 +32,7 @@
 
 #include "amule.h" // Needed for theApp
 #include "HashListFile.h"
+#include "CompletedDownloadHistory.h"
 #include "MemFile.h"     // Needed for CMemFile
 #include "Preferences.h" // Needed for thePrefs
 #include "GuiEvents.h"
@@ -39,6 +40,7 @@
 #include "PartFile.h"      // Needed for CPartFile::CanAddSource
 #include "DownloadQueue.h" // Needed for CDownloadQueue
 #include "KnownFileList.h" // Needed for CKnownFileList
+#include "SharedFileList.h"
 #include "SearchList.h"
 
 namespace
@@ -661,6 +663,31 @@ void CSearchFile::SetDownloadStatus()
 	for (CSearchResultList::iterator it = m_children.begin(); it != m_children.end(); ++it) {
 		Notify_Search_Update_Sources(*it);
 	}
+}
+
+bool CSearchFile::WasCompletedBefore() const
+{
+	return thePrefs::IsCompletedHistoryEnabled() && theApp->completedDownloadHistory &&
+	       theApp->completedDownloadHistory->Contains(m_abyFileHash);
+}
+
+bool CSearchFile::IsCurrentlyShared() const
+{
+	return theApp->sharedfiles && theApp->sharedfiles->GetFileByID(m_abyFileHash) != NULL;
+}
+
+bool CSearchFile::IsAvailableLocally() const
+{
+	const auto now = std::chrono::steady_clock::now();
+	if (m_localAvailabilityCached && now - m_localAvailabilityCheckedAt < std::chrono::seconds(5)) {
+		return m_localAvailabilityValue;
+	}
+	CKnownFile *known =
+		theApp->knownfiles ? theApp->knownfiles->FindKnownFileByID(m_abyFileHash) : nullptr;
+	m_localAvailabilityValue = known && known->GetFilePath().FileExists();
+	m_localAvailabilityCheckedAt = now;
+	m_localAvailabilityCached = true;
+	return m_localAvailabilityValue;
 }
 
 // File_checked_for_headers

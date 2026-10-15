@@ -959,7 +959,10 @@ void EmitDiffsAndUpdate(CEventBus &bus, LastSeenState &prev, const CState &state
 	// Kad-notes cluster. Comparing only these keeps the channel quiet on a running search.
 	const auto result_mutated = [](const SearchResult &a, const SearchResult &b) {
 		if (a.status != b.status || a.already_downloaded != b.already_downloaded ||
-			a.rating != b.rating || a.kad_comment_searching != b.kad_comment_searching ||
+			a.completed_before != b.completed_before ||
+			a.available_locally != b.available_locally ||
+			a.currently_shared != b.currently_shared || a.rating != b.rating ||
+			a.kad_comment_searching != b.kad_comment_searching ||
 			a.comments.size() != b.comments.size())
 			return true;
 		for (std::size_t i = 0; i < a.comments.size(); ++i) {

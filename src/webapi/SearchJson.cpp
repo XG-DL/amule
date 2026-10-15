@@ -53,6 +53,12 @@ void WriteSearchResultFields(CJsonWriter &w, const SearchResult &r)
 	// `have` reads as the wire verb; `downloaded` is the state (R4: no prefix).
 	w.Key("already_downloaded");
 	w.ValueBool(r.already_downloaded);
+	w.Key("completed_before");
+	w.ValueBool(r.completed_before);
+	w.Key("available_locally");
+	w.ValueBool(r.available_locally);
+	w.Key("currently_shared");
+	w.ValueBool(r.currently_shared);
 	w.Key("rating");
 	w.ValueInt(static_cast<int64_t>(r.rating));
 	w.Key("status");

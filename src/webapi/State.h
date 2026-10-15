@@ -801,6 +801,10 @@ struct SearchResult
 	std::uint32_t source_count = 0;
 	std::uint32_t complete_source_count = 0;
 	bool already_downloaded = false;
+	// Independent facts: history is durable; availability/shared are current filesystem views.
+	bool completed_before = false;
+	bool available_locally = false;
+	bool currently_shared = false;
 	std::uint8_t rating = 0;
 	// Download status of the result on this node (issue #429), a lowercase string from
 	// the CSearchFile enum: "new" | "downloaded" | "queued" | "canceled" |
@@ -1069,6 +1073,8 @@ struct PreferencesSnapshot
 	// [Files] EC_TAG_PREFS_FILES
 	struct FilesPrefs
 	{
+		bool completed_download_history_enabled = true;
+		std::uint32_t completed_download_history_retention_days = 0;
 		bool ich_enabled = false;
 		bool trust_unverified_aich_hashes = false;
 		bool add_new_downloads_paused = false;

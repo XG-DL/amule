@@ -38,6 +38,7 @@
 #include <wx/stopwatch.h>
 
 #include "amule.h"
+#include "CompletedDownloadHistory.h"
 #include "FileArea.h" // Needed to push MMapEnabled into CFileArea
 #include "config.h"   // Needed for PACKAGE_STRING
 
@@ -126,6 +127,18 @@ bool CPreferences::s_appimageIntegrationDeclined;
 bool CPreferences::s_mintotray;
 bool CPreferences::s_notify;
 bool CPreferences::s_rememberSearchHistory;
+uint32 CPreferences::s_completedHistoryRetentionDays;
+bool CPreferences::s_completedHistoryEnabled;
+
+void CPreferences::SetCompletedHistoryRetentionDays(uint32 days)
+{
+	s_completedHistoryRetentionDays = days;
+#ifndef CLIENT_GUI
+	if (theApp && theApp->completedDownloadHistory) {
+		theApp->completedDownloadHistory->SetRetentionDays(days);
+	}
+#endif
+}
 bool CPreferences::s_trayiconenabled;
 bool CPreferences::s_addnewfilespaused;
 bool CPreferences::s_addserversfromserver;
@@ -1121,6 +1134,10 @@ void CPreferences::BuildItemList(const wxString &appdir)
 	NewCfgItem(
 		IDC_CREATEFILESSPARSE, (new Cfg_Bool("/eMule/CreateSparseFiles", s_createFilesSparse, true)));
 	NewCfgItem(IDC_MMAP_ENABLE, (new Cfg_Bool("/eMule/MMapEnabled", s_mmapEnabled, false)));
+	NewCfgItem(IDC_COMPLETED_HISTORY_ENABLED,
+		(new Cfg_Bool("/eMule/CompletedHistoryEnabled", s_completedHistoryEnabled, true)));
+	NewCfgItem(IDC_COMPLETED_HISTORY_RETENTION,
+		(MkCfg_Int("/eMule/CompletedHistoryRetentionDays", s_completedHistoryRetentionDays, 0)));
 
 	/** Web Server */
 	NewCfgItem(IDC_OSDIR, (new Cfg_Path("/eMule/OSDirectory", s_OSDirectory, appdir)));

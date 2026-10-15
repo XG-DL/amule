@@ -4291,9 +4291,15 @@ void CSearchListRem::ProcessItemUpdate(const CEC_SearchFile_Tag *tag, CSearchFil
 	uint32 sourceCount = file->m_sourceCount;
 	uint32 completeSourceCount = file->m_completeSourceCount;
 	CSearchFile::DownloadStatus status = file->m_downloadStatus;
+	const bool completedBefore = file->m_completedBefore;
+	const bool availableLocally = file->m_availableLocally;
+	const bool currentlyShared = file->m_currentlyShared;
 	tag->SourceCount(&file->m_sourceCount);
 	tag->CompleteSourceCount(&file->m_completeSourceCount);
 	tag->DownloadStatus((uint32 *)&file->m_downloadStatus);
+	tag->CompletedBefore(&file->m_completedBefore);
+	tag->AvailableLocally(&file->m_availableLocally);
+	tag->CurrentlyShared(&file->m_currentlyShared);
 	const CECTag *ed2kTag = tag->GetTagByName(EC_TAG_SEARCHFILE_ED2K_SOURCES);
 	const CECTag *kadTag = tag->GetTagByName(EC_TAG_SEARCHFILE_KAD_SOURCES);
 	const bool networkCountsChanged = UpdateSearchSourceCounts(file->m_networkSourceCounts,
@@ -4325,7 +4331,9 @@ void CSearchListRem::ProcessItemUpdate(const CEC_SearchFile_Tag *tag, CSearchFil
 	DecodeMediaTags(tag, file);
 
 	if (networkCountsChanged || file->m_sourceCount != sourceCount ||
-		file->m_completeSourceCount != completeSourceCount || file->m_downloadStatus != status) {
+		file->m_completeSourceCount != completeSourceCount || file->m_downloadStatus != status ||
+		file->m_completedBefore != completedBefore || file->m_availableLocally != availableLocally ||
+		file->m_currentlyShared != currentlyShared) {
 		if (theApp->amuledlg && theApp->amuledlg->m_searchwnd) {
 			theApp->amuledlg->m_searchwnd->UpdateResult(file);
 		}

@@ -25,6 +25,10 @@
 
 #include "PrefsUnifiedDlg.h"
 #include "DialogLayout.h"
+#include <ec/cpp/ECTag.h>
+#include <ec/cpp/ECSpecialTags.h>
+#include <ec/cpp/RemoteConnect.h>
+#include "libwebcommon/PicoJson_Inc.h"
 
 #include <common/Constants.h>
 #include <common/Macros.h> // Needed for itemsof()
@@ -40,10 +44,15 @@
 #include <wx/listctrl.h> // shared-folders editor (remote GUI)
 #include <set>           // set-compare of shared roots (session refresh)
 #include <wx/progdlg.h>
+#include <wx/file.h>
+#include <wx/filedlg.h>
+#include <wx/textdlg.h>
+#include <wx/weakref.h>
 #include <wx/scrolwin.h>               // independently scrollable preference pages
 #include "SharedFilesReloadProgress.h" // ReloadSharedFilesWithProgress
 
 #include <memory> // std::unique_ptr (progress dialog lifetime)
+#include <functional>
 #include <wx/stdpaths.h>
 #include <wx/utils.h> // wxGetUserHome
 
@@ -75,6 +84,11 @@
 #include "ClientList.h"
 #include "DirectoryTreeCtrl.h" // Needed for CDirectoryTreeCtrl
 #include "Preferences.h"
+#ifndef CLIENT_GUI
+#include "CompletedDownloadHistory.h"
+#else
+#include "amule-remote-gui.h"
+#endif
 #include "SharedDirsApplyTask.h" // Recursive-share expansion worker
 #include "muuli_wdr.h"
 #include "Logger.h"
@@ -90,6 +104,224 @@
 
 namespace
 {
+class CCompletedHistoryReplyHandler : public CECPacketHandlerBase
+{
+public:
+	explicit CCompletedHistoryReplyHandler(std::function<void(const CECPacket *)> callback)
+	: m_callback(std::move(callback))
+	{
+	}
+	void HandlePacket(const CECPacket *packet) override
+	{
+		m_callback(packet);
+		delete this;
+	}
+	void AbortPendingRequest() override { delete this; }
+
+private:
+	std::function<void(const CECPacket *)> m_callback;
+};
+
+bool WriteHistoryFile(const wxString &path, const std::string &json)
+{
+	wxFile file(path, wxFile::write);
+	return file.IsOpened() && file.Write(json.data(), json.size()) == json.size();
+}
+
+bool AppendHistoryFile(const wxString &path, const std::string &data)
+{
+	wxFile file(path, wxFile::write_append);
+	return file.IsOpened() && file.Write(data.data(), data.size()) == data.size();
+}
+
+bool ReadHistoryFile(const wxString &path, std::string &json)
+{
+	wxFile file(path);
+	if (!file.IsOpened())
+		return false;
+	const wxFileOffset length = file.Length();
+	if (length <= 0 || length > 64 * 1024 * 1024)
+		return false;
+	json.resize(static_cast<size_t>(length));
+	return file.Read(&json[0], length) == length;
+}
+
+#ifdef CLIENT_GUI
+struct RemoteHistoryState
+{
+	wxWeakRef<PrefsUnifiedDlg> dialog;
+	CRemoteConnect *connection = nullptr;
+	wxString path;
+	std::string id;
+	size_t total = 0;
+	size_t offset = 0;
+	bool merge = false;
+	picojson::array entries;
+};
+
+class CCompletedHistoryAsyncHandler : public CECPacketHandlerBase
+{
+public:
+	explicit CCompletedHistoryAsyncHandler(std::function<void(const CECPacket *)> callback)
+	: m_callback(std::move(callback))
+	{
+	}
+	void HandlePacket(const CECPacket *packet) override
+	{
+		m_callback(packet);
+		delete this;
+	}
+	void AbortPendingRequest() override
+	{
+		m_callback(nullptr);
+		delete this;
+	}
+
+private:
+	std::function<void(const CECPacket *)> m_callback;
+};
+
+void SendRemoteHistoryExportBatch(const std::shared_ptr<RemoteHistoryState> &state);
+void SendRemoteHistoryImportBatch(const std::shared_ptr<RemoteHistoryState> &state);
+
+std::string RemoteHistoryError(const CECPacket *reply, const char *fallback)
+{
+	if (reply) {
+		if (const CECTag *error = reply->GetTagByName(EC_TAG_STRING))
+			return error->GetStringData().ToStdString();
+	}
+	return fallback;
+}
+
+void ShowRemoteHistoryResult(
+	const std::shared_ptr<RemoteHistoryState> &state, const std::string &message, bool success)
+{
+	if (!state->dialog)
+		return;
+	wxMessageBox(wxString::FromUTF8(message),
+		success ? _("History transfer complete") : _("History transfer failed"),
+		wxOK | (success ? wxICON_INFORMATION : wxICON_ERROR),
+		state->dialog);
+}
+
+void SendRemoteHistoryEndExport(const std::shared_ptr<RemoteHistoryState> &state)
+{
+	CECPacket request(EC_OP_COMPLETED_HISTORY);
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(7)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+	state->connection->SendRequest(new CCompletedHistoryAsyncHandler([](const CECPacket *) {}), &request);
+}
+
+void SendRemoteHistoryExportBatch(const std::shared_ptr<RemoteHistoryState> &state)
+{
+	if (state->offset >= state->total) {
+		if (!AppendHistoryFile(state->path, "]}")) {
+			SendRemoteHistoryEndExport(state);
+			wxRemoveFile(state->path);
+			ShowRemoteHistoryResult(state, "Could not write the history file.", false);
+			return;
+		}
+		SendRemoteHistoryEndExport(state);
+		ShowRemoteHistoryResult(state, "Completed download history exported.", true);
+		return;
+	}
+	CECPacket request(EC_OP_COMPLETED_HISTORY);
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(2)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_OFFSET, static_cast<uint32>(state->offset)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_LIMIT, static_cast<uint32>(512)));
+	state->connection->SendRequest(new CCompletedHistoryAsyncHandler([state](const CECPacket *reply) {
+		const CECTag *data = reply && reply->GetOpCode() != EC_OP_FAILED
+					     ? reply->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_DATA)
+					     : nullptr;
+		if (!data) {
+			SendRemoteHistoryEndExport(state);
+			wxRemoveFile(state->path);
+			ShowRemoteHistoryResult(state,
+				RemoteHistoryError(
+					reply, "Could not read a completed-history batch from the core."),
+				false);
+			return;
+		}
+		const wxScopedCharBuffer utf8 = data->GetStringData().ToUTF8();
+		const std::string batch(utf8.data(), utf8.length());
+		picojson::value parsed;
+		if (!picojson::parse(parsed, batch).empty() || !parsed.is<picojson::array>()) {
+			SendRemoteHistoryEndExport(state);
+			wxRemoveFile(state->path);
+			ShowRemoteHistoryResult(state, "The core returned an invalid history batch.", false);
+			return;
+		}
+		const size_t expected = std::min<size_t>(512, state->total - state->offset);
+		if (parsed.get<picojson::array>().size() != expected || batch.size() < 2 ||
+			!AppendHistoryFile(state->path,
+				(state->offset ? "," : "") + batch.substr(1, batch.size() - 2))) {
+			SendRemoteHistoryEndExport(state);
+			wxRemoveFile(state->path);
+			ShowRemoteHistoryResult(state,
+				"The core returned an incomplete history batch or the file could not be "
+				"written.",
+				false);
+			return;
+		}
+		state->offset += expected;
+		SendRemoteHistoryExportBatch(state);
+	}),
+		&request);
+}
+
+void SendRemoteHistoryImportBatch(const std::shared_ptr<RemoteHistoryState> &state)
+{
+	if (state->offset >= state->entries.size()) {
+		CECPacket request(EC_OP_COMPLETED_HISTORY);
+		request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(5)));
+		request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+		state->connection->SendRequest(new CCompletedHistoryAsyncHandler([state](const CECPacket
+												 *reply) {
+			if (!reply || reply->GetOpCode() == EC_OP_FAILED) {
+				CECPacket abort(EC_OP_COMPLETED_HISTORY);
+				abort.AddTag(
+					CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(6)));
+				abort.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+				state->connection->SendRequest(
+					new CCompletedHistoryAsyncHandler([](const CECPacket *) {}), &abort);
+				ShowRemoteHistoryResult(state,
+					RemoteHistoryError(reply, "Could not save the imported history."),
+					false);
+			} else
+				ShowRemoteHistoryResult(state, "Completed download history imported.", true);
+		}),
+			&request);
+		return;
+	}
+	picojson::array batch;
+	const size_t end = std::min(state->offset + 512, state->entries.size());
+	batch.reserve(end - state->offset);
+	for (; state->offset < end; ++state->offset)
+		batch.push_back(state->entries[state->offset]);
+	CECPacket request(EC_OP_COMPLETED_HISTORY);
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(4)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_DATA,
+		wxString::FromUTF8(picojson::value(batch).serialize().c_str())));
+	state->connection->SendRequest(new CCompletedHistoryAsyncHandler([state](const CECPacket *reply) {
+		if (!reply || reply->GetOpCode() == EC_OP_FAILED) {
+			CECPacket abort(EC_OP_COMPLETED_HISTORY);
+			abort.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(6)));
+			abort.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+			state->connection->SendRequest(
+				new CCompletedHistoryAsyncHandler([](const CECPacket *) {}), &abort);
+			ShowRemoteHistoryResult(state,
+				RemoteHistoryError(reply, "The core rejected a history batch."),
+				false);
+			return;
+		}
+		SendRemoteHistoryImportBatch(state);
+	}),
+		&request);
+}
+#endif
+
 // Controls can live inside nested panels/static boxes. Refresh their owning page.
 void RefreshPreferencesPage(wxWindow *window)
 {
@@ -169,6 +401,9 @@ wxBEGIN_EVENT_TABLE(PrefsUnifiedDlg, wxDialog)
 
 	EVT_BUTTON(ID_PREFS_OK_TOP, PrefsUnifiedDlg::OnOk)
 	EVT_BUTTON(ID_PREFS_CANCEL_TOP, PrefsUnifiedDlg::OnCancel)
+	EVT_BUTTON(IDC_COMPLETED_HISTORY_CLEAR, PrefsUnifiedDlg::OnClearCompletedHistory)
+	EVT_BUTTON(IDC_COMPLETED_HISTORY_EXPORT, PrefsUnifiedDlg::OnExportCompletedHistory)
+	EVT_BUTTON(IDC_COMPLETED_HISTORY_IMPORT, PrefsUnifiedDlg::OnImportCompletedHistory)
 
 	// Browse buttons
 	//	EVT_BUTTON(IDC_SELSKIN,		PrefsUnifiedDlg::OnButtonDir)
@@ -1588,6 +1823,272 @@ void PrefsUnifiedDlg::OnClose(wxCloseEvent &event)
 
 		Destroy();
 	}
+}
+
+void PrefsUnifiedDlg::OnClearCompletedHistory(wxCommandEvent &WXUNUSED(event))
+{
+	if (wxMessageBox(_("Clear all recorded completed downloads? This cannot be undone."),
+		    _("Clear completed download history"),
+		    wxYES_NO | wxNO_DEFAULT | wxICON_WARNING,
+		    this) != wxYES) {
+		return;
+	}
+
+#ifdef CLIENT_GUI
+	if (theApp->glob_prefs) {
+		CECTag files(EC_TAG_PREFS_FILES, static_cast<uint8_t>(0));
+		files.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_CLEAR, static_cast<uint8_t>(1)));
+		static_cast<CPreferencesRem *>(theApp->glob_prefs)->SendPartialToRemote(files);
+	}
+#else
+	if (theApp->completedDownloadHistory) {
+		theApp->completedDownloadHistory->Clear();
+	}
+#endif
+
+	wxMessageBox(_("Completed download history has been cleared."),
+		_("Clear completed download history"),
+		wxOK | wxICON_INFORMATION,
+		this);
+}
+
+void PrefsUnifiedDlg::OnExportCompletedHistory(wxCommandEvent &WXUNUSED(event))
+{
+	wxFileDialog dialog(this,
+		_("Export completed download history"),
+		wxEmptyString,
+		"amule-completed-history.json",
+		"JSON files (*.json)|*.json",
+		wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+	if (dialog.ShowModal() != wxID_OK)
+		return;
+	const wxString path = dialog.GetPath();
+#ifdef CLIENT_GUI
+	if (!theApp->m_connect)
+		return;
+	if (!WriteHistoryFile(
+		    path, "{\"format\":\"amule.completed-download-history\",\"version\":1,\"entries\":[")) {
+		wxMessageBox(_("Could not write the history file."),
+			_("Export failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	auto state = std::make_shared<RemoteHistoryState>();
+	state->dialog = this;
+	state->connection = theApp->m_connect;
+	state->path = path;
+	state->id = "wx-" + std::to_string(wxGetLocalTimeMillis().GetValue());
+	CECPacket request(EC_OP_COMPLETED_HISTORY);
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(1)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+	state->connection->SendRequest(new CCompletedHistoryAsyncHandler([state](const CECPacket *reply) {
+		const CECTag *total = reply && reply->GetOpCode() != EC_OP_FAILED
+					      ? reply->GetTagByName(EC_TAG_FILES_COMPLETED_HISTORY_TOTAL)
+					      : nullptr;
+		if (!total) {
+			wxRemoveFile(state->path);
+			ShowRemoteHistoryResult(state,
+				RemoteHistoryError(
+					reply, "The core could not export completed download history."),
+				false);
+			return;
+		}
+		state->total = total->GetInt();
+		SendRemoteHistoryExportBatch(state);
+	}),
+		&request);
+#else
+	std::string error;
+	if (!theApp->completedDownloadHistory) {
+		wxMessageBox(_("Could not export completed download history."),
+			_("Export failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	const std::string id = "wx-" + std::to_string(wxGetLocalTimeMillis().GetValue());
+	size_t total = 0;
+	uint64 revision = 0;
+	static_cast<void>(revision);
+	if (!theApp->completedDownloadHistory->BeginExport(id, total, revision, error) ||
+		!WriteHistoryFile(path,
+			"{\"format\":\"amule.completed-download-history\",\"version\":1,\"entries\":[")) {
+		theApp->completedDownloadHistory->EndExport(id);
+		wxMessageBox(wxString::FromUTF8(error.empty() ? "Could not write the history file." : error),
+			_("Export failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	bool ok = true;
+	for (size_t offset = 0; offset < total; offset += 512) {
+		std::string batch;
+		if (!theApp->completedDownloadHistory->ExportJsonBatch(
+			    id, offset, 512, batch, total, error) ||
+			batch.size() < 2 ||
+			!AppendHistoryFile(path, (offset ? "," : "") + batch.substr(1, batch.size() - 2))) {
+			ok = false;
+			break;
+		}
+	}
+	theApp->completedDownloadHistory->EndExport(id);
+	if (!ok || !AppendHistoryFile(path, "]}")) {
+		wxRemoveFile(path);
+		wxMessageBox(wxString::FromUTF8(error.empty() ? "Could not write the history file." : error),
+			_("Export failed"),
+			wxOK | wxICON_ERROR,
+			this);
+	} else {
+		wxMessageBox(_("Completed download history exported."),
+			_("Export complete"),
+			wxOK | wxICON_INFORMATION,
+			this);
+	}
+#endif
+}
+
+void PrefsUnifiedDlg::OnImportCompletedHistory(wxCommandEvent &WXUNUSED(event))
+{
+	wxFileDialog dialog(this,
+		_("Import completed download history"),
+		wxEmptyString,
+		wxEmptyString,
+		"JSON files (*.json)|*.json",
+		wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	if (dialog.ShowModal() != wxID_OK)
+		return;
+	const int choice = wxMessageBox(
+		_("Choose Yes to merge the file with this history. Choose No to replace this history. "
+		  "Entries older than this device's retention period will be removed immediately."),
+		_("Import completed download history"),
+		wxYES_NO | wxCANCEL | wxICON_QUESTION,
+		this);
+	if (choice == wxID_CANCEL)
+		return;
+	const bool merge = choice == wxID_YES;
+	std::string json;
+	if (!ReadHistoryFile(dialog.GetPath(), json)) {
+		wxMessageBox(_("Could not read the history file or it exceeds the 64 MiB import limit."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+#ifdef CLIENT_GUI
+	if (!theApp->m_connect)
+		return;
+	picojson::value root;
+	if (!picojson::parse(root, json).empty() || !root.is<picojson::object>()) {
+		wxMessageBox(_("The history file is not valid JSON."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	auto &object = root.get<picojson::object>();
+	const auto format = object.find("format"), version = object.find("version"),
+		   entries = object.find("entries");
+	if (format == object.end() || !format->second.is<std::string>() ||
+		format->second.get<std::string>() != "amule.completed-download-history" ||
+		version == object.end() || !version->second.is<double>() ||
+		version->second.get<double>() != 1.0 || entries == object.end() ||
+		!entries->second.is<picojson::array>() ||
+		entries->second.get<picojson::array>().size() > 700000) {
+		wxMessageBox(_("The history file format is unsupported or contains too many records."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	auto state = std::make_shared<RemoteHistoryState>();
+	state->dialog = this;
+	state->connection = theApp->m_connect;
+	state->merge = merge;
+	state->entries = std::move(entries->second.get<picojson::array>());
+	json.clear();
+	json.shrink_to_fit();
+	state->id = "wx-" + std::to_string(wxGetLocalTimeMillis().GetValue());
+	CECPacket request(EC_OP_COMPLETED_HISTORY);
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_ACTION, static_cast<uint8>(3)));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_TRANSFER, state->id));
+	request.AddTag(CECTag(EC_TAG_FILES_COMPLETED_HISTORY_MERGE, static_cast<uint8>(merge)));
+	state->connection->SendRequest(new CCompletedHistoryAsyncHandler([state](const CECPacket *reply) {
+		if (!reply || reply->GetOpCode() == EC_OP_FAILED) {
+			ShowRemoteHistoryResult(state,
+				RemoteHistoryError(reply, "Could not begin the core history import."),
+				false);
+			return;
+		}
+		SendRemoteHistoryImportBatch(state);
+	}),
+		&request);
+#else
+	std::string error;
+	if (!theApp->completedDownloadHistory) {
+		wxMessageBox(_("Could not import completed download history."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	picojson::value root;
+	if (!picojson::parse(root, json).empty() || !root.is<picojson::object>()) {
+		wxMessageBox(_("The history file is not valid JSON."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	auto &object = root.get<picojson::object>();
+	const auto format = object.find("format"), version = object.find("version"),
+		   entries = object.find("entries");
+	if (format == object.end() || !format->second.is<std::string>() ||
+		format->second.get<std::string>() != "amule.completed-download-history" ||
+		version == object.end() || !version->second.is<double>() ||
+		version->second.get<double>() != 1.0 || entries == object.end() ||
+		!entries->second.is<picojson::array>() ||
+		entries->second.get<picojson::array>().size() > 700000) {
+		wxMessageBox(_("The history file format is unsupported or contains too many records."),
+			_("Import failed"),
+			wxOK | wxICON_ERROR,
+			this);
+		return;
+	}
+	auto importedEntries = std::move(entries->second.get<picojson::array>());
+	json.clear();
+	json.shrink_to_fit();
+	root = picojson::value();
+	const std::string id = "wx-" + std::to_string(wxGetLocalTimeMillis().GetValue());
+	if (!theApp->completedDownloadHistory->BeginImport(id, merge, error)) {
+		wxMessageBox(wxString::FromUTF8(error), _("Import failed"), wxOK | wxICON_ERROR, this);
+		return;
+	}
+	bool ok = true;
+	for (size_t offset = 0; offset < importedEntries.size(); offset += 512) {
+		picojson::array batch;
+		const size_t end = std::min(importedEntries.size(), offset + 512);
+		batch.reserve(end - offset);
+		for (size_t i = offset; i < end; ++i)
+			batch.push_back(std::move(importedEntries[i]));
+		const std::string batchJson = picojson::value(std::move(batch)).serialize();
+		if (!theApp->completedDownloadHistory->ImportJsonBatch(id, batchJson, error)) {
+			ok = false;
+			break;
+		}
+	}
+	if (ok)
+		ok = theApp->completedDownloadHistory->CommitImport(id, error);
+	if (!ok) {
+		theApp->completedDownloadHistory->AbortImport(id);
+		wxMessageBox(wxString::FromUTF8(error), _("Import failed"), wxOK | wxICON_ERROR, this);
+	} else {
+		wxMessageBox(_("Completed download history imported."),
+			_("Import complete"),
+			wxOK | wxICON_INFORMATION,
+			this);
+	}
+#endif
 }
 
 void PrefsUnifiedDlg::OnCancel(wxCommandEvent &WXUNUSED(event))

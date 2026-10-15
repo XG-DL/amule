@@ -405,6 +405,8 @@ table.data.virtual td.name .name-select { width: 100%; max-width: 100%; }
 .badge.stopped { color: var(--bad); border-color: var(--bad); }
 .badge.error { color: var(--bad); border-color: var(--bad); }
 .badge.waiting { color: var(--warn); border-color: var(--warn); }
+.search-result-state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.search-result-state .badge { white-space: nowrap; }
 
 /* --- placeholders --- */
 .placeholder {

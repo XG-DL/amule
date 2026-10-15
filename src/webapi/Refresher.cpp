@@ -2460,6 +2460,15 @@ void MergeSearchResultTag(const CEC_SearchFile_Tag *sf, SearchResult &r)
 			r.already_downloaded = sf->AlreadyHave();
 		}
 	}
+	{
+		bool v = false;
+		if (sf->AssignIfExist(EC_TAG_SEARCHFILE_COMPLETED_BEFORE, v))
+			r.completed_before = v;
+		if (sf->AssignIfExist(EC_TAG_SEARCHFILE_AVAILABLE_LOCALLY, v))
+			r.available_locally = v;
+		if (sf->AssignIfExist(EC_TAG_SEARCHFILE_CURRENTLY_SHARED, v))
+			r.currently_shared = v;
+	}
 	// Derived from the filename, so it is recomputed whenever the name is.
 	if (!r.name.empty()) {
 		r.type = FileTypeToken(r.name);

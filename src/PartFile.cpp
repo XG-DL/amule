@@ -69,6 +69,7 @@
 #include "SearchList.h"       // Needed for CSearchFile
 #include "ClientList.h"       // Needed for clientlist
 #include "Statistics.h"       // Needed for theStats
+#include "CompletedDownloadHistory.h"
 #include "Logger.h"
 #include <common/Format.h>        // Needed for CFormat
 #include <common/FileFunctions.h> // Needed for GetLastModificationTime
@@ -2408,6 +2409,9 @@ void CPartFile::CompleteFileEnded(bool errorOccured, const CPath &newname)
 		m_lastDateChanged = CPath::GetModificationTime(m_fullname);
 
 		SetStatus(PS_COMPLETE);
+		if (theApp->completedDownloadHistory) {
+			theApp->completedDownloadHistory->Record(GetFileHash());
+		}
 		m_paused = false;
 		ClearPriority();
 

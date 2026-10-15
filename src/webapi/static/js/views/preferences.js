@@ -156,6 +156,12 @@ const TABS = [
       { key: "on_finished_start_next_alphabetically", type: "bool", sub: true, gatedBy: "on_finished_start_next_paused" },
       { key: "endgame_mode_enabled", type: "bool" },
       { key: "preallocate_full_file_size", type: "bool" },
+      { key: "completed_download_history_enabled", type: "bool" },
+      { key: "completed_download_history_retention_days", type: "int", min: 0, max: 36500 },
+      { key: "clear_completed_download_history", type: "button", labelKey: "prefs_field_files_clear_completed_download_history",
+        action: { path: "/completed_download_history/clear", confirmKey: "prefs_history_clear_confirm", toastKey: "prefs_history_clear_toast" } },
+      { key: "export_completed_download_history", type: "history_export", labelKey: "prefs_field_files_export_completed_download_history" },
+      { key: "import_completed_download_history", type: "history_import", labelKey: "prefs_field_files_import_completed_download_history" },
       { key: "create_sparse_files", type: "bool" },
       { key: "stop_on_low_disk_space", type: "bool" },
       { key: "min_free_space_mebibytes", type: "int", min: 1, max: 1000000, sub: true, gatedBy: "stop_on_low_disk_space" },
@@ -543,14 +549,15 @@ export default function Preferences({ isGuest }) {
 
     // A pure action: no value, no state, never collected. The label is the
     // button's own text, so the row needs no separate <label>.
-    if (f.type === "button") {
+    if (f.type === "button" || f.type === "history_export" || f.type === "history_import") {
       // .admin-only on the row, not the button: a guest sees no empty grid
       // cell where the action would have been, which is how the text fields'
       // action buttons already behave (they are simply not rendered).
       return html`
         <div class=${"field field-inline admin-only" + subCls}>
           <button class="btn btn-primary" type="button" disabled=${disabled}
-                  title=${t(f.action.titleKey)} onClick=${() => runAction(f.action)}>
+                  title=${f.action ? t(f.action.titleKey) : label}
+                  onClick=${f.type === "history_export" ? exportCompletedHistory : f.type === "history_import" ? importCompletedHistory : () => runAction(f.action)}>
             ${label}
           </button>
         </div>`;
@@ -610,6 +617,7 @@ export default function Preferences({ isGuest }) {
   // the download with whatever is typed -- no Apply first, no PATCH here.
   // An action with no `body` carries no value at all (Reload): POST and done.
   const runAction = async (a, val) => {
+    if (a.confirmKey && !(await confirmDialog(t(a.confirmKey)))) return;
     let body;
     if (a.body) {
       const url = String(val == null ? "" : val).trim();
@@ -620,13 +628,112 @@ export default function Preferences({ isGuest }) {
     catch (err) { toast(terr(err) || t("prefs_error"), "error"); }
   };
 
+  const exportCompletedHistory = async () => {
+    let transferId = null;
+    const retryOnce = async (operation) => {
+      try { return await operation(); }
+      catch (err) {
+        if (err.status !== 0 && err.status < 500) throw err;
+        return operation();
+      }
+    };
+    try {
+      const transfer = await api.post("completed_download_history/export/start");
+      transferId = transfer.transfer_id;
+      if (!Number.isSafeInteger(transfer.total_bytes) || transfer.total_bytes < 1 || transfer.total_bytes > 64 * 1024 * 1024 ||
+          !Number.isSafeInteger(transfer.chunk_bytes) || transfer.chunk_bytes < 1 || transfer.chunk_bytes > 512 * 1024)
+        throw new Error("Invalid history export metadata");
+      const chunks = [];
+      for (let offset = 0; offset < transfer.total_bytes;) {
+        const part = await retryOnce(() => api.getBytes("completed_download_history/export/chunk/" + transferId + "?offset=" + offset));
+        chunks.push(part.bytes);
+        const next = Number(part.headers.get("X-History-Next-Offset"));
+        const expected = Math.min(transfer.chunk_bytes, transfer.total_bytes - offset);
+        const total = Number(part.headers.get("X-History-Total-Bytes"));
+        if (!Number.isSafeInteger(next) || !Number.isSafeInteger(total) || total !== transfer.total_bytes ||
+            next !== offset + expected || part.bytes.byteLength !== expected) throw new Error("Invalid history export chunk");
+        offset = next;
+      }
+      const blob = new Blob(chunks, { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "amule-completed-history.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      try { await api.post("completed_download_history/export/complete?transfer_id=" + transferId); }
+      catch (_) {
+        try { await api.post("completed_download_history/transfer/cancel?transfer_id=" + transferId); } catch (_) {}
+      }
+      transferId = null;
+      toast(t("prefs_history_export_toast"), "success");
+    } catch (err) {
+      if (transferId) {
+        try { await api.post("completed_download_history/transfer/cancel?transfer_id=" + transferId); } catch (_) {}
+      }
+      toast(terr(err) || t("prefs_error"), "error");
+    }
+  };
+
+  const importCompletedHistory = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.size > 64 * 1024 * 1024) {
+        toast(t("prefs_history_size_limit"), "warn");
+        return;
+      }
+      const mode = window.prompt(t("prefs_history_import_mode_prompt"), "merge");
+      if (mode === null) return;
+      const normalized = mode.trim().toLowerCase();
+      if (normalized !== "merge" && normalized !== "replace") {
+        toast(t("prefs_history_import_mode_invalid"), "warn");
+        return;
+      }
+      let transferId = null;
+      const retryOnce = async (operation) => {
+        try { return await operation(); }
+        catch (err) {
+          if (err.status !== 0 && err.status < 500) throw err;
+          return operation();
+        }
+      };
+      try {
+        const transfer = await api.post("completed_download_history/import/start?mode=" + normalized + "&total_bytes=" + file.size);
+        transferId = transfer.transfer_id;
+        if (transfer.total_bytes !== file.size || !Number.isSafeInteger(transfer.chunk_bytes) ||
+            transfer.chunk_bytes < 1 || transfer.chunk_bytes > 512 * 1024) throw new Error("Invalid history import metadata");
+        for (let offset = 0; offset < file.size;) {
+          const expected = Math.min(transfer.chunk_bytes, file.size - offset);
+          const bytes = await file.slice(offset, offset + expected).arrayBuffer();
+          if (bytes.byteLength !== expected) throw new Error("The selected history file could not be read completely");
+          await retryOnce(() => api.postBytes("completed_download_history/import/chunk/" + transferId + "?offset=" + offset, bytes));
+          offset += bytes.byteLength;
+        }
+        const commitPath = "completed_download_history/import/commit?transfer_id=" + transferId;
+        await retryOnce(() => api.post(commitPath)); // Merge and replace are idempotent for the same file.
+        transferId = null;
+        toast(t(normalized === "merge" ? "prefs_history_merge_toast" : "prefs_history_replace_toast"), "success");
+      } catch (err) {
+        if (transferId) {
+          try { await api.post("completed_download_history/transfer/cancel?transfer_id=" + transferId); } catch (_) {}
+        }
+        toast(terr(err) || t("prefs_error"), "error");
+      }
+    };
+    input.click();
+  };
+
   const collect = () => {
     const body = {};
     for (const tab of TABS) {
       for (const grp of tab.groups) {
         for (const f of grp.fields) {
           const cat = catOf(tab, f);
-          if (f.type === "button" || f.hidden || f.readonly) continue;
+          if (f.type === "button" || f.type === "history_export" || f.type === "history_import" || f.hidden || f.readonly) continue;
           if (asArr(f.gatedBy).some((k) => CAPS.has(cat + "." + k) && values[cat + "." + k] === false)) continue;
           const val = values[cat + "." + f.key];
           // Not sent to this session: sending "" would wipe the stored value.

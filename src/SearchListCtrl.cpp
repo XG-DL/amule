@@ -1097,15 +1097,22 @@ void CSearchListCtrl::DownloadSelected(int category)
 wxString CSearchListCtrl::DetermineStatusPrintable(CSearchFile *toshow)
 {
 	switch (toshow->GetDownloadStatus()) {
-	case CSearchFile::DOWNLOADED:
-		return _("Downloaded");
 	case CSearchFile::QUEUED:
 	case CSearchFile::QUEUEDCANCELED:
 		return _("Queued");
 	case CSearchFile::CANCELED:
 		return _("Canceled");
 	default:
-		return _("New");
+		break;
 	}
+	if (toshow->IsCurrentlyShared())
+		return _("Shared now");
+	if (toshow->IsAvailableLocally())
+		return _("Available locally");
+	if (toshow->WasCompletedBefore())
+		return _("Previously downloaded");
+	if (toshow->GetDownloadStatus() == CSearchFile::DOWNLOADED)
+		return _("Known by aMule");
+	return _("New");
 }
 // File_checked_for_headers

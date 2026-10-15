@@ -78,6 +78,7 @@
 #include "IPv6ChangeNotification.h" // Needed for ShouldMarkIPv6ChangeNotification
 #endif
 #include "HashListFile.h"
+#include "CompletedDownloadHistory.h"
 #include "ClientCreditsList.h"    // Needed for CClientCreditsList
 #include "ClientList.h"           // Needed for CClientList
 #include "ClientUDPSocket.h"      // Needed for CClientUDPSocket & CMuleUDPSocket
@@ -245,6 +246,7 @@ CamuleApp::CamuleApp()
 	browsemanager = nullptr;
 	knownfiles = NULL;
 	canceledfiles = NULL;
+	completedDownloadHistory = NULL;
 	serverlist = NULL;
 	serverconnect = NULL;
 	m_IP2Country = nullptr;
@@ -444,6 +446,9 @@ int CamuleApp::OnExit()
 
 	delete canceledfiles;
 	canceledfiles = NULL;
+
+	delete completedDownloadHistory;
+	completedDownloadHistory = NULL;
 
 	// Immediately before clientlist, and after everything that destroys clients on its way
 	// out -- serverconnect, listensocket, clientudp. Each of those reaps peers through
@@ -950,6 +955,7 @@ bool CamuleApp::OnInit()
 	friendlist = new CFriendList();
 	chatsessions = new CChatSessionStore();
 	searchlist = new CSearchList();
+	completedDownloadHistory = new CCompletedDownloadHistory();
 	browsemanager = new CBrowseManager();
 	knownfiles = new CKnownFileList(knownProgress);
 #ifdef AMULE_SHOW_SPLASH

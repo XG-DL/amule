@@ -225,6 +225,9 @@ private:
 
 	void OnOk(wxCommandEvent &event);
 	void OnCancel(wxCommandEvent &event);
+	void OnClearCompletedHistory(wxCommandEvent &event);
+	void OnExportCompletedHistory(wxCommandEvent &event);
+	void OnImportCompletedHistory(wxCommandEvent &event);
 	void OnClose(wxCloseEvent &event);
 
 	void OnButtonBrowseApplication(wxCommandEvent &event);

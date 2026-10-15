@@ -619,6 +619,7 @@ if (BUILD_REMOTEGUI)
 
 	target_link_libraries (amulegui
 		PRIVATE ec
+		PRIVATE picojson_header
 		PRIVATE muleappcommon
 		PRIVATE muleappgui
 		PRIVATE mulecommon
@@ -913,6 +914,7 @@ if (NEED_LIB_MULEAPPCORE)
 		kademlia/utils/UInt128.cpp
 		AsyncDNS.cpp
 		HashListFile.cpp
+		CompletedDownloadHistory.cpp
 		DeadSourceList.cpp
 		FileArea.cpp
 		FileAutoClose.cpp

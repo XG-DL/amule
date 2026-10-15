@@ -342,10 +342,18 @@ bool CSearchListModel::GetAttr(
 	// than wxSystemSettings::GetAppearance().IsDark() alone.
 	const bool isDark = IsListBackgroundDark(m_owner);
 	wxColour colour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+	auto setSourceColour = [&]() {
+		const int shift = std::min((int)file->GetSourceCount() * 5, 180);
+		colour = isDark ? wxColour(255 - shift, 255 - shift, 255) : wxColour(0, 0, shift);
+	};
 
 	switch (file->GetDownloadStatus()) {
 	case CSearchFile::DOWNLOADED:
-		colour = isDark ? wxColour(80, 220, 80) : wxColour(0, 160, 0);
+		if (file->IsCurrentlyShared() || file->IsAvailableLocally() || file->WasCompletedBefore()) {
+			colour = isDark ? wxColour(80, 220, 80) : wxColour(0, 160, 0);
+			break;
+		}
+		setSourceColour();
 		break;
 	case CSearchFile::QUEUED:
 	case CSearchFile::QUEUEDCANCELED:
@@ -354,11 +362,9 @@ bool CSearchListModel::GetAttr(
 	case CSearchFile::CANCELED:
 		colour = isDark ? wxColour(255, 120, 200) : wxColour(180, 0, 180);
 		break;
-	default: {
-		const int shift = std::min((int)file->GetSourceCount() * 5, 180);
-		colour = isDark ? wxColour(255 - shift, 255 - shift, 255) : wxColour(0, 0, shift);
+	default:
+		setSourceColour();
 		break;
-	}
 	}
 
 	attr.SetColour(colour);
